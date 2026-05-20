@@ -1,0 +1,64 @@
+ref: salesforce.bulk_query
+label: "Salesforce Bulk Query"
+description: |
+  Run a SOQL query via Bulk Query API 2.0 for very large result sets.
+  CSV results are streamed page-by-page directly to a file-backed Attune
+  artifact on the shared artifact volume — they are NOT returned inline
+  in the execution result, to avoid bloating the execution row's JSONB.
+  The emit payload references the artifact by id/ref/version so
+  downstream tasks can read or post-process the file.
+enabled: true
+
+runner_type: python
+entry_point: bulk_query.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  soql:           { type: string,  required: true }
+  query_all:      { type: boolean, default: false, description: "Use queryAll variant (includes deleted/archived)." }
+  max_records:    { type: integer, description: "Optional cap on number of records written (truncates after this many rows)." }
+  poll_interval_seconds: { type: number,  default: 2 }
+  timeout_seconds:       { type: integer, default: 600 }
+
+  # ---- Artifact controls -----------------------------------------------
+  artifact_ref:
+    type: string
+    description: "Stable artifact ref to write CSV results into. Defaults to `salesforce.bulk_query.<execution_id>` (per-execution snapshot)."
+  artifact_name:
+    type: string
+    description: "Display name for the artifact (defaults to `Bulk Query <job_id>`)."
+  artifact_description:
+    type: string
+    description: "Optional artifact description."
+  artifact_visibility:
+    type: string
+    description: "`public` or `private`. Defaults to the API's per-type default (private for file artifacts)."
+  artifact_retention_policy:
+    type: string
+    default: "versions"
+    description: "Artifact retention policy (`versions` keeps the N most-recent versions)."
+  artifact_retention_limit:
+    type: integer
+    default: 10
+
+output_schema:
+  ok:                { type: boolean }
+  job_id:            { type: string }
+  state:             { type: string }
+  records_processed: { type: integer }
+  artifact:
+    type: object
+    description: "Reference to the file artifact holding the CSV results."
+
+tags: [salesforce, bulk, query, artifact]

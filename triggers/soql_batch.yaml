@@ -1,0 +1,86 @@
+ref: salesforce.soql_batch
+label: "Salesforce SOQL Batch"
+description: "Fires once per salesforce.soql_poll sensor tick (batch mode) carrying all records returned by that tick."
+enabled: true
+
+type: event
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped Attune key holding the Salesforce credential object passed to sf_toolkit.lazy_login."
+  api_version:
+    type: string
+    description: "Salesforce REST API version (e.g. 'v60.0'). Defaults to the Salesforce org's latest available version."
+
+  # ---- Query: structured form (preferred) ----
+  sobject:
+    type: string
+    description: "sObject API name to poll (e.g. 'Account', 'User', 'GroupMember'). Required unless 'soql' is set."
+  fields:
+    type: array
+    description: "SELECT list. Defaults to [Id, cursor_field]. Strings are also accepted (comma-separated). cursor_field is always included automatically."
+  where:
+    type: string
+    description: "Optional SOQL WHERE fragment (no leading 'WHERE'). Combined with the auto-injected '{cursor_field} > :cursor' via AND."
+  order_by:
+    type: string
+    description: "ORDER BY clause without the leading keyword. Defaults to '{cursor_field} ASC' so the watermark advances monotonically."
+  limit:
+    type: integer
+    description: "Optional LIMIT for each tick. Recommended for large objects to keep ticks bounded."
+
+  # ---- Query: raw form (advanced / overrides structured) ----
+  soql:
+    type: string
+    description: "Raw SOQL template overriding the structured fields. Use ':cursor' as a placeholder for the watermark value (it is substituted with the formatted cursor on each tick)."
+
+  # ---- Watermark / dedupe ----
+  cursor_field:
+    type: string
+    description: "Field used as the watermark. Defaults to 'SystemModstamp'."
+    default: "SystemModstamp"
+  id_field:
+    type: string
+    description: "Record identity field for dedupe. Defaults to 'Id'."
+    default: "Id"
+  cursor_initial:
+    type: string
+    description: "Starting cursor value used on the first tick (e.g. '2024-01-01T00:00:00Z'). Defaults to 'now' at startup."
+  lookback_seconds:
+    type: number
+    description: "Pseudo-window upper bound. When > 0 the SOQL becomes '{cursor_field} > :cursor AND {cursor_field} <= now - lookback_seconds', so rows committed within this many seconds aren't read until they've had time to settle (handles Salesforce commit/visibility lag and clock skew). Defaults to 0 (no upper bound)."
+    default: 0
+  query_all:
+    type: boolean
+    description: "If true, use the queryAll endpoint (includes deleted/archived records). Defaults to false."
+    default: false
+
+  # ---- Timing ----
+  poll_interval_seconds:
+    type: integer
+    description: "Seconds between ticks for this rule"
+    default: 60
+  query_timeout_seconds:
+    type: number
+    description: "Per-tick query timeout. The tick is skipped if the query takes longer"
+    default: 300
+
+output:
+  sobject:
+    type: string
+  records:
+    type: array
+    required: true
+    description: "All records returned by this poll cycle."
+  count:
+    type: integer
+    required: true
+  query:
+    type: string
+  cursor_value:
+    type: string
+    description: "Highest cursor field value seen in this batch."
+
+tags: [salesforce, soql, polling, batch]

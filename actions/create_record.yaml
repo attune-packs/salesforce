@@ -1,0 +1,30 @@
+ref: salesforce.create_record
+label: "Salesforce Create Record"
+description: "Create a single Salesforce record. Returns the new Id."
+enabled: true
+
+runner_type: python
+entry_point: create_record.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject: { type: string, required: true }
+  fields:  { type: object, required: true, description: "Map of field API names to values for the new record." }
+
+output_schema:
+  ok:      { type: boolean }
+  id:      { type: string, description: "Id of the newly created record." }
+  errors:  { type: array, description: "Salesforce error array if creation failed." }
+
+tags: [salesforce, crud, write]

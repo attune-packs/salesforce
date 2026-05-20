@@ -1,0 +1,30 @@
+ref: salesforce.get_record
+label: "Salesforce Get Record"
+description: "Fetch a single Salesforce record by Id, optionally selecting specific fields."
+enabled: true
+
+runner_type: python
+entry_point: get_record.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject: { type: string, required: true, description: "API name, e.g. Account, Contact, MyObj__c" }
+  id:      { type: string, required: true, description: "Salesforce record Id (15 or 18 char)" }
+  fields:  { type: array, description: "Optional list of field API names. If omitted, returns all default fields." }
+
+output_schema:
+  ok:     { type: boolean }
+  record: { type: object }
+
+tags: [salesforce, crud, read]

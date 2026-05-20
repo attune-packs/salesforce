@@ -1,0 +1,75 @@
+ref: salesforce.bulk_delete
+label: "Salesforce Bulk Delete"
+description: |
+  Delete a large set of records via Bulk API 2.0. Records to delete can
+  be specified by:
+
+    * `id_query` — a SOQL query whose result rows define the Ids to
+      delete (e.g. `SELECT Id FROM Account WHERE LastModifiedDate < ...`).
+      The query runs through the Bulk Query API and Ids are streamed
+      directly into the delete job.
+    * `ids[]` — an explicit array of Salesforce Ids.
+    * `records[]` — inline record maps (each must contain `Id`).
+    * `input_artifact_ref` / `input_artifact_id` — an Attune artifact
+      whose CSV/JSON/JSONL rows contain `Id`.
+
+  Set `hard_delete: true` to skip the Recycle Bin (requires the
+  "Bulk API Hard Delete" user permission in the org).
+enabled: true
+
+runner_type: python
+entry_point: bulk_delete.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject:
+    { type: string, required: true }
+  hard_delete:
+    type: boolean
+    default: false
+    description: "If true, perform a hardDelete (skip Recycle Bin)."
+
+  # Source of Ids to delete (one of)
+  id_query:
+    type: string
+    description: "SOQL query whose result rows identify records to delete (Id column required)."
+  ids:
+    type: array
+    description: "Explicit array of Salesforce Ids."
+  records:
+    type: array
+    description: "Inline record maps; each must contain an `Id` field."
+  input_artifact_ref:
+    type: string
+    description: "Attune artifact ref (CSV/JSON/JSONL); rows must contain `Id`."
+  input_artifact_id:
+    type: integer
+    description: "Attune artifact ID (alternative to `input_artifact_ref`)."
+  input_artifact_version:
+    type: integer
+    description: "Specific version of the input artifact (defaults to latest)."
+
+  poll_interval_seconds: { type: number,  default: 2 }
+  timeout_seconds:       { type: integer, default: 600 }
+
+output_schema:
+  ok:                { type: boolean }
+  operation:         { type: string }
+  job_id:            { type: string }
+  state:             { type: string }
+  records_input:     { type: integer }
+  records_processed: { type: integer }
+  records_failed:    { type: integer }
+
+tags: [salesforce, bulk, delete, write]

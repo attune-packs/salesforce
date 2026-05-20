@@ -1,0 +1,21 @@
+ref: salesforce.soql_poll
+label: "Salesforce SOQL Polling Sensor"
+description: |
+  Long-lived async sensor process. All configuration is supplied per-rule
+  on the bound triggers (salesforce.soql_record / salesforce.soql_batch):
+  credential_key, sobject / fields / where / order_by / limit (or a raw
+  soql), cursor_field, cursor_initial, lookback_seconds, poll_interval_seconds,
+  query_timeout_seconds, query_all, mode, etc. The sensor itself takes no
+  parameters — see the trigger definitions for the full rule-config schema.
+enabled: true
+
+runner_type: python
+entry_point: soql_poll.py
+
+trigger_types:
+  - salesforce.soql_record
+  - salesforce.soql_batch
+
+poll_interval: 60
+
+tags: [salesforce, soql, polling]

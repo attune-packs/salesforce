@@ -1,0 +1,56 @@
+ref: salesforce.bulk_insert
+label: "Salesforce Bulk Insert"
+description: |
+  Insert a large array of records via Bulk API 2.0 (async job; this
+  action waits for completion). Records can be supplied inline via
+  `records[]` for small batches, or by referencing an Attune artifact
+  (`input_artifact_ref` or `input_artifact_id`) holding CSV, JSON, or
+  JSONL — useful when the dataset is too large to fit in execution
+  parameters or when chaining off of `salesforce.bulk_query`.
+enabled: true
+
+runner_type: python
+entry_point: bulk_insert.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject:
+    { type: string, required: true }
+
+  # ---- Records source (one of) -----------------------------------------
+  records:
+    type: array
+    description: "Inline records as flat field maps. Used when no input artifact is provided."
+  input_artifact_ref:
+    type: string
+    description: "Attune artifact ref to read records from (CSV, JSON array, or JSONL). Takes precedence over `records`."
+  input_artifact_id:
+    type: integer
+    description: "Attune artifact ID (alternative to `input_artifact_ref`). Takes precedence over both."
+  input_artifact_version:
+    type: integer
+    description: "Specific version of the input artifact (defaults to latest)."
+
+  poll_interval_seconds: { type: number,  default: 2 }
+  timeout_seconds:       { type: integer, default: 600 }
+
+output_schema:
+  ok:                { type: boolean }
+  job_id:            { type: string }
+  state:             { type: string }
+  records_input:     { type: integer }
+  records_processed: { type: integer }
+  records_failed:    { type: integer }
+
+tags: [salesforce, bulk, write]

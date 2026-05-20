@@ -1,0 +1,32 @@
+ref: salesforce.fetch_list
+label: "Salesforce Fetch List (Composite)"
+description: "Read up to 2000 records by Id in one call using the Composite sObject Collections API. Wraps sf-toolkit fetch_list."
+enabled: true
+
+runner_type: python
+entry_point: fetch_list.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject: { type: string, required: true }
+  ids:     { type: array, required: true, description: "Array of Salesforce record Ids to fetch (chunked into 2000-row batches automatically)." }
+  fields:  { type: array, required: true, description: "Field API names to retrieve for each record." }
+
+output_schema:
+  ok:       { type: boolean }
+  records:  { type: array, description: "Records in the same order as the input Ids. Missing/inaccessible Ids appear as null." }
+  found:    { type: integer }
+  missing:  { type: integer }
+
+tags: [salesforce, composite, read, batch]

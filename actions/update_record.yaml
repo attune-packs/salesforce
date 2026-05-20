@@ -1,0 +1,30 @@
+ref: salesforce.update_record
+label: "Salesforce Update Record"
+description: "Update fields on an existing Salesforce record by Id (PATCH)."
+enabled: true
+
+runner_type: python
+entry_point: update_record.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject: { type: string, required: true }
+  id:      { type: string, required: true }
+  fields:  { type: object, required: true, description: "Field updates to apply." }
+
+output_schema:
+  ok: { type: boolean }
+  id: { type: string }
+
+tags: [salesforce, crud, write]

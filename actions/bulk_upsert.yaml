@@ -1,0 +1,57 @@
+ref: salesforce.bulk_upsert
+label: "Salesforce Bulk Upsert"
+description: |
+  Upsert a large array of records via Bulk API 2.0 keyed on an external
+  Id field. Records can be supplied inline via `records[]` for small
+  batches, or by referencing an Attune artifact (`input_artifact_ref`
+  or `input_artifact_id`) holding CSV, JSON, or JSONL.
+enabled: true
+
+runner_type: python
+entry_point: bulk_upsert.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject:
+    { type: string, required: true }
+  external_id_field:
+    type: string
+    required: true
+    description: "External Id field name on the SObject used as the upsert key."
+
+  records:
+    type: array
+    description: "Inline records (each must include the `external_id_field` value)."
+  input_artifact_ref:
+    type: string
+    description: "Attune artifact ref to read records from (CSV, JSON array, or JSONL)."
+  input_artifact_id:
+    type: integer
+    description: "Attune artifact ID (alternative to `input_artifact_ref`). Takes precedence."
+  input_artifact_version:
+    type: integer
+    description: "Specific version of the input artifact (defaults to latest)."
+
+  poll_interval_seconds: { type: number,  default: 2 }
+  timeout_seconds:       { type: integer, default: 600 }
+
+output_schema:
+  ok:                { type: boolean }
+  job_id:            { type: string }
+  state:             { type: string }
+  records_input:     { type: integer }
+  records_processed: { type: integer }
+  records_failed:    { type: integer }
+
+tags: [salesforce, bulk, write]

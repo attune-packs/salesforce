@@ -1,0 +1,33 @@
+ref: salesforce.upsert_record
+label: "Salesforce Upsert Record"
+description: "Upsert a Salesforce record using an external Id field. Creates the record if no match exists, otherwise updates it."
+enabled: true
+
+runner_type: python
+entry_point: upsert_record.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject:           { type: string, required: true }
+  external_id_field: { type: string, required: true, description: "API name of the external Id field, e.g. Legacy_Id__c" }
+  external_id_value: { type: string, required: true }
+  fields:            { type: object, required: true, description: "Field values to set." }
+
+output_schema:
+  ok:      { type: boolean }
+  id:      { type: string }
+  created: { type: boolean, description: "True if a new record was created." }
+  errors:  { type: array }
+
+tags: [salesforce, crud, upsert]

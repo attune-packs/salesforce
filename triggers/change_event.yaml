@@ -1,0 +1,51 @@
+ref: salesforce.change_event
+label: "Salesforce Change Event (CDC)"
+description: "Fires for every Salesforce Change Data Capture event received by the change_data_capture sensor (CREATE / UPDATE / DELETE / UNDELETE on subscribed channels)."
+enabled: true
+
+type: event
+
+parameters:
+  entity_name:
+    type: string
+    description: "Optional: only fire when the change event is for this sObject API name (e.g. Account)."
+  change_type:
+    type: string
+    description: "Optional: only fire for one of CREATE | UPDATE | DELETE | UNDELETE | GAP_CREATE | GAP_UPDATE | GAP_DELETE | GAP_UNDELETE | GAP_OVERFLOW."
+
+output:
+  change_type:
+    type: string
+    required: true
+  entity_name:
+    type: string
+    required: true
+  record_ids:
+    type: array
+    required: true
+    description: "Record Ids affected by this change event (CDC may carry several)."
+  changed_fields:
+    type: array
+    description: "Field API names changed in this event (UPDATE only)."
+  commit_timestamp:
+    type: integer
+    description: "Salesforce commit timestamp (ms since epoch)."
+  commit_user:
+    type: string
+    description: "User Id of the committer."
+  transaction_key:
+    type: string
+  sequence_number:
+    type: integer
+  replay_id:
+    type: integer
+    description: "Salesforce replay Id of this event — store for resumability."
+  channel:
+    type: string
+    description: "CometD channel that delivered the event, e.g. /data/AccountChangeEvent."
+  payload:
+    type: object
+    description: "The full ChangeEventHeader + record payload as received from Salesforce."
+    required: true
+
+tags: [salesforce, cdc, streaming, inbound]

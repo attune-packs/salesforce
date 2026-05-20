@@ -1,0 +1,45 @@
+ref: salesforce.query
+label: "Salesforce SOQL Query"
+description: "Execute a SOQL query against Salesforce and return matching records. Supports Query All (includes deleted/archived rows) and pagination via nextRecordsUrl."
+enabled: true
+
+runner_type: python
+entry_point: query.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  soql:
+    type: string
+    required: true
+    description: "SOQL query, e.g. SELECT Id, Name FROM Account WHERE LastModifiedDate > LAST_N_DAYS:7"
+  query_all:
+    type: boolean
+    default: false
+    description: "Use queryAll endpoint (includes deleted and archived records)."
+  next_records_url:
+    type: string
+    description: "If set, fetches the next page rather than executing soql. Pass the value of `nextRecordsUrl` from a prior response."
+  fetch_all_pages:
+    type: boolean
+    default: false
+    description: "If true, follow nextRecordsUrl until exhausted and return all records in one response."
+
+output_schema:
+  ok:           { type: boolean }
+  records:      { type: array,   description: "Matching records as plain dicts." }
+  total_size:   { type: integer }
+  done:         { type: boolean, description: "False if there are more pages and fetch_all_pages was not set." }
+  next_records_url: { type: string, description: "Pass to a subsequent invocation to fetch the next page (when not auto-paginating)." }
+
+tags: [salesforce, soql, query]

@@ -1,0 +1,31 @@
+ref: salesforce.delete_list
+label: "Salesforce Delete List (Composite)"
+description: "Delete up to 200 records by Id in one call using the Composite sObject Collections API. Wraps sf-toolkit delete_list."
+enabled: true
+
+runner_type: python
+entry_point: delete_list.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  ids:         { type: array, required: true }
+  all_or_none: { type: boolean, default: false }
+
+output_schema:
+  ok:        { type: boolean }
+  results:   { type: array, description: "Per-id result: { success, id, errors[] }." }
+  succeeded: { type: integer }
+  failed:    { type: integer }
+
+tags: [salesforce, composite, delete, batch]

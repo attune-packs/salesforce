@@ -1,0 +1,70 @@
+ref: salesforce.save_list
+label: "Salesforce Save List (Composite)"
+description: |
+  Create and/or update many records in one call via the Composite sObject
+  Collections API (wraps sf-toolkit). Items without an Id are inserted;
+  items with an Id are updated. Pass `external_id_field` to switch to
+  upsert semantics.
+
+  Records may be **heterogeneous** — i.e. a single batch can contain
+  multiple sObject types — as long as each record carries
+  `attributes.type`. This makes the action a natural dispatch target for
+  a work queue that intakes raw SObject records and calls this action in
+  batches of up to 200 (the Salesforce composite-collection cap).
+
+  - If `sobject` is provided, it is used as the default `attributes.type`
+    for any record that doesn't already declare one.
+  - If `sobject` is omitted, every record MUST already have
+    `attributes.type` set.
+  - For upsert (`external_id_field` set), the Salesforce endpoint is
+    per-sObject-type; records with mixed types are grouped and dispatched
+    per group. For predictable behavior, prefer queue-side grouping by
+    `record.attributes.type` before calling.
+enabled: true
+
+runner_type: python
+entry_point: save_list.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  sobject:
+    type: string
+    description: |
+      Default sObject type. Optional when records already carry
+      `attributes.type` (e.g. raw records from a queue). Required when
+      `external_id_field` is set AND records are not already homogeneous.
+  records:
+    type: array
+    required: true
+    description: |
+      Records to save. Each item is a JSON object. For insert, omit the
+      `Id` field; for update, include it. Each record may include
+      `attributes.type` to declare its sObject type — this is required
+      when no `sobject` parameter is provided. Limit: 200 records per
+      sub-call (the action chunks larger lists automatically).
+  all_or_none:
+    type: boolean
+    default: false
+    description: "If true, the entire batch fails atomically when any record errors."
+  external_id_field:
+    type: string
+    description: "If set, use upsert semantics keyed on this external Id field. When set with mixed sObject types, records are grouped by type and one upsert call is issued per type."
+
+output_schema:
+  ok:        { type: boolean }
+  results:   { type: array, description: "Per-record results aligned with input. Each entry: { success, id, created?, errors[] }." }
+  succeeded: { type: integer }
+  failed:    { type: integer }
+
+tags: [salesforce, composite, write, batch, queue]

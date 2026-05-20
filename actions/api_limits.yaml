@@ -1,0 +1,29 @@
+ref: salesforce.api_limits
+label: "Salesforce API Limits"
+description: "Return Salesforce org API usage and limits (DailyApiRequests, DataStorageMB, etc.) for monitoring."
+enabled: true
+
+runner_type: python
+entry_point: api_limits.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    {
+      type: string,
+      description: "Optional explicit instance URL (overrides what lazy_login returns).",
+    }
+  api_version: { type: string, default: "v60.0" }
+
+output_schema:
+  ok: { type: boolean }
+  limits:
+    { type: object, description: "Map of limit name to { Max, Remaining }." }
+
+tags: [salesforce, monitoring, limits]

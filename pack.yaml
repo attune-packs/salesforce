@@ -1,0 +1,83 @@
+# Attune Salesforce Integration Pack
+# CRUD + composite + bulk + Apex actions and SOQL/CDC sensors backed by
+# the python-sf-toolkit library.
+
+ref: salesforce
+label: "Salesforce Integration"
+name: "Salesforce Integration"
+description: "Standard interface for the Salesforce REST/Streaming APIs — CRUD, composite (sObject Collections), Bulk API 2.0, anonymous Apex, SOQL polling sensor, and Change Data Capture sensor."
+version: "0.1.0"
+author: "Attune Team"
+email: "integrations@attune.io"
+
+# Pack configuration schema — flat format.
+#
+# Auth model:
+#   1. Store the Salesforce credential blob as a pack-scoped encrypted key in
+#      the Attune keystore. The blob mirrors `sf_toolkit.lazy_login` kwargs;
+#      sf-toolkit picks the flow (JWT bearer, password, client_credentials,
+#      CLI) based on which fields are present.
+#
+#        attune key create -e \
+#          --owner-type pack --owner-pack-ref salesforce \
+#          --ref salesforce_acme \
+#          --value '{
+#            "username":     "integration@acme.com",
+#            "consumer_key": "3MVG9...",
+#            "private_key":  "-----BEGIN RSA PRIVATE KEY-----\n...",
+#            "domain":       "login"
+#          }'
+#
+#   2. Pass the keystore ref to actions/sensors as `credential_key`. The pack
+#      uses this ref for three things at once:
+#        • the credential lookup (one-time per process via the API),
+#        • the sf_toolkit `connection_name` (in-process connection cache),
+#        • the prefix of a separate cached session-token keystore key
+#          (`<credential_key>_session_token`) that sf_toolkit's
+#          token_refresh_callback writes to whenever the access token is
+#          (re)issued — letting subsequent processes skip the login round
+#          trip while the cached token is still fresh.
+conf_schema:
+  credential_key:
+    type: string
+    description: "Default keystore key ref holding the credentials object. Doubles as the sf_toolkit connection name and as the prefix for the cached session-token keystore entry."
+  api_version:
+    type: string
+    description: "Salesforce REST API version."
+    default: "v60.0"
+  session_token_max_age_seconds:
+    type: integer
+    description: "Discard cached session tokens older than this many seconds and force a fresh login. Default 5400 (90 minutes)."
+    default: 5400
+
+config:
+  api_version: "v60.0"
+
+meta:
+  category: "integration"
+  keywords:
+    - salesforce
+    - crm
+    - soql
+    - cdc
+    - streaming
+    - bulk-api
+  python_dependencies:
+    - "sf-toolkit>=0.5"
+    - "httpx>=0.26"
+    - "PyJWT[crypto]>=2.8"
+    - "cryptography>=42"
+  documentation_url: "https://androxxtraxxon.github.io/python-sf-toolkit/"
+
+tags:
+  - salesforce
+  - crm
+  - integration
+
+runtime_deps:
+  - python
+  - shell
+
+enabled: true
+
+dependencies: {}

@@ -1,0 +1,40 @@
+ref: salesforce.change_data_capture
+label: "Salesforce Change Data Capture Sensor"
+description: "Subscribes to one or more Salesforce Change Data Capture channels via CometD/Bayeux long-polling, and emits salesforce.change_event events for every CDC notification received. Supports replay_id-based resume (modern replacement for the legacy PushTopic Streaming API)."
+enabled: true
+
+runner_type: python
+entry_point: change_data_capture.py
+
+trigger_types:
+  - salesforce.change_event
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Required. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  channel:
+    type: string
+    required: true
+    description: |
+      Salesforce CDC channel:
+        /data/ChangeEvents                    — all CDC events
+        /data/<SObject>ChangeEvent            — standard object (e.g. /data/AccountChangeEvent)
+        /data/<CustomObject>__ChangeEvent     — custom object
+  replay_id:
+    type: integer
+    default: -1
+    description: "Initial replay value: -1 = new events only, -2 = events from the retention window. Persisted state overrides this after the first event."
+  reconnect_interval_seconds:
+    type: integer
+    default: 5
+
+poll_interval: 1
+
+tags: [salesforce, cdc, streaming, cometd]
