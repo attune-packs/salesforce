@@ -1,0 +1,63 @@
+ref: salesforce.process_queue_dml_item
+label: "Salesforce Process Queue DML Item"
+description: |
+  Apply one Salesforce DML operation described by an Attune queue item.
+  The queue item may be supplied as `queue_item`, `item`, or `payload`.
+
+  Queue item shape:
+    {
+      "operation": "create" | "update" | "upsert" | "delete",
+      "sobject": "Account",
+      "record": { "Name": "Acme" },
+      "id": "001..." ,
+      "external_id_field": "External_Id__c",
+      "external_id_value": "acme-1"
+    }
+
+  `fields` is accepted as an alias for `record`. `sobject` may be omitted
+  when `record.attributes.type` is present. For upsert, the external id value
+  may be supplied directly or present in the record under `external_id_field`.
+enabled: true
+
+runner_type: python
+entry_point: process_queue_dml_item.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  queue_item:
+    type: object
+    description: "Single queue item to process. Alias: item or payload."
+  item:
+    type: object
+    description: "Alias for queue_item."
+  payload:
+    type: object
+    description: "Alias for queue_item; convenient when an Attune queue item payload is passed through directly."
+  sobject:
+    type: string
+    description: "Default sObject type when the item does not provide sobject or record.attributes.type."
+  external_id_field:
+    type: string
+    description: "Default external id field for upsert items."
+
+output_schema:
+  ok:        { type: boolean }
+  operation: { type: string }
+  sobject:   { type: string }
+  id:        { type: string }
+  created:   { type: boolean }
+  errors:    { type: array }
+  result:    { type: object }
+
+tags: [salesforce, queue, dml, write]

@@ -1,0 +1,65 @@
+ref: salesforce.process_queue_dml_batch
+label: "Salesforce Process Queue DML Batch"
+description: |
+  Apply many Salesforce DML queue items using the Composite sObject
+  Collections API. Items are grouped by operation and endpoint and sent in
+  chunks of up to 200 records, Salesforce's composite collection limit.
+
+  Accepts items as `queue_items`, `items`, or `payload`. Each item has the
+  same shape as salesforce.process_queue_dml_item:
+    {
+      "operation": "create" | "update" | "upsert" | "delete",
+      "sobject": "Account",
+      "record": { "Name": "Acme" },
+      "id": "001...",
+      "external_id_field": "External_Id__c",
+      "external_id_value": "acme-1"
+    }
+
+  Results are returned in the same order as the input items even though the
+  action may issue multiple grouped Composite API calls.
+enabled: true
+
+runner_type: python
+entry_point: process_queue_dml_batch.py
+parameter_delivery: stdin
+parameter_format: json
+output_format: json
+
+parameters:
+  credential_key:
+    type: string
+    required: true
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  instance_url:
+    { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
+  api_version:
+    { type: string, default: "v60.0" }
+
+  queue_items:
+    type: array
+    description: "Queue DML items to process. Alias: items or payload."
+  items:
+    type: array
+    description: "Alias for queue_items."
+  payload:
+    type: array
+    description: "Alias for queue_items; convenient when queue payloads are passed directly."
+  sobject:
+    type: string
+    description: "Default sObject type when items do not provide sobject or record.attributes.type."
+  external_id_field:
+    type: string
+    description: "Default external id field for upsert items."
+  all_or_none:
+    type: boolean
+    default: false
+    description: "If true, each Composite API sub-call fails atomically when any record in that sub-call errors."
+
+output_schema:
+  ok:        { type: boolean }
+  results:   { type: array, description: "Per-item Salesforce results aligned with the input item order." }
+  succeeded: { type: integer }
+  failed:    { type: integer }
+
+tags: [salesforce, queue, dml, composite, batch]
