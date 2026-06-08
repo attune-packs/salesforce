@@ -1,8 +1,7 @@
+attune-sdk[sensor]>=0.1.0,<0.2.0
 sf-toolkit>=0.5
-# httpx is also a transitive dep of sf-toolkit (SalesforceClient subclasses
-# httpx.Client). We list it explicitly because we use it directly for the
-# Attune keystore round-trips and for any non-JSON Salesforce calls (CSV
-# upload/download, CometD long-poll) that go through the toolkit's client.
-httpx>=0.26
+# httpx is also a transitive dep of attune-sdk and sf-toolkit (SalesforceClient
+# subclasses httpx.Client). We list it explicitly because non-JSON Salesforce
+# calls (CSV upload/download, CometD long-poll) go through the toolkit's client.
+httpx>=0.27
 PyJWT[crypto]>=2.8
-cryptography>=42

@@ -8,6 +8,7 @@ session-token caching, and the kwargs we forward to lazy_login.
 import os
 import sys
 import time
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -96,6 +97,48 @@ def _set_attune_env(monkeypatch):
     monkeypatch.setenv("ATTUNE_API_TOKEN", "exec-token-xyz")
 
 
+def _install_fake_attune_sdk(monkeypatch, *, key_value):
+    client = object()
+    attune_mod = types.ModuleType("attune")
+    attune_mod.context = types.SimpleNamespace(
+        api_url="https://attune.local",
+        api_token="exec-token-xyz",
+        client=client,
+    )
+
+    api_client_mod = types.ModuleType("attune.api_client")
+    api_mod = types.ModuleType("attune.api_client.api")
+    secrets_mod = types.ModuleType("attune.api_client.api.secrets")
+    get_key_mod = types.ModuleType("attune.api_client.api.secrets.get_key")
+
+    calls = {}
+
+    def fake_sync_detailed(ref, *, client):
+        calls["ref"] = ref
+        calls["client"] = client
+        return types.SimpleNamespace(
+            status_code=200,
+            content=b"",
+            parsed=types.SimpleNamespace(
+                data=types.SimpleNamespace(value=key_value),
+            ),
+        )
+
+    get_key_mod.sync_detailed = fake_sync_detailed
+    secrets_mod.get_key = get_key_mod
+
+    monkeypatch.setitem(sys.modules, "attune", attune_mod)
+    monkeypatch.setitem(sys.modules, "attune.api_client", api_client_mod)
+    monkeypatch.setitem(sys.modules, "attune.api_client.api", api_mod)
+    monkeypatch.setitem(sys.modules, "attune.api_client.api.secrets", secrets_mod)
+    monkeypatch.setitem(
+        sys.modules,
+        "attune.api_client.api.secrets.get_key",
+        get_key_mod,
+    )
+    return client, calls
+
+
 def test_fetch_credential_from_keystore_object(monkeypatch):
     _set_attune_env(monkeypatch)
     captured = {}
@@ -122,6 +165,20 @@ def test_fetch_credential_from_keystore_object(monkeypatch):
     assert captured["url"] == "https://attune.local/api/v1/keys/sf_creds"
     assert captured["auth"] == "Bearer exec-token-xyz"
     assert creds["consumer_key"] == "ck-from-keystore"
+
+
+def test_fetch_credential_uses_attune_sdk_client(monkeypatch):
+    expected = {
+        "consumer_key": "ck-from-sdk",
+        "username": "u@acme.com",
+        "private_key": "PEMDATA",
+    }
+    client, calls = _install_fake_attune_sdk(monkeypatch, key_value=expected)
+
+    creds = sf_client._fetch_credential_from_keystore("sf_creds")
+
+    assert creds == expected
+    assert calls == {"ref": "sf_creds", "client": client}
 
 
 def test_fetch_credential_from_keystore_404(monkeypatch):

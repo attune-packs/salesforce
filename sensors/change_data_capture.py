@@ -25,12 +25,12 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import _sensor_base
+from _sensor_runtime import RuleState, Sensor, emit_event, run_sensor
 from lib import sf_client
 
-logger = _sensor_base.configure_logging()
+logger = logging.getLogger("salesforce.change_data_capture")
 
 
 def _state_dir() -> str:
@@ -180,12 +180,18 @@ def _normalise_event(channel: str, event_data: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def _run_rule(rule: Dict[str, Any], stop: Dict[str, bool]) -> None:
-    rule_id = int(rule.get("id", 0))
-    cfg_in = rule.get("config") or {}
+def _sleep_responsive(seconds: float, sensor: Sensor, stop_event: threading.Event, step: float = 1.0) -> None:
+    end = time.time() + seconds
+    while not sensor.is_shutting_down and not stop_event.is_set() and time.time() < end:
+        time.sleep(min(step, max(0.0, end - time.time())))
+
+
+def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> None:
+    rule_id = int(rule.rule_id)
+    cfg_in = rule.trigger_params or {}
     channel = cfg_in.get("channel")
     if not channel:
-        logger.warning("rule %s: missing 'channel' — thread exiting", rule_id)
+        sensor.logger.warning("rule %s: missing 'channel' — thread exiting", rule_id)
         return
 
     # The rule config IS the action_params surface for sf_client.
@@ -199,24 +205,25 @@ def _run_rule(rule: Dict[str, Any], stop: Dict[str, bool]) -> None:
     reconnect = int(cfg_in.get("reconnect_interval_seconds", 5))
     instance_id = f"rule_{rule_id}"
 
-    while not stop["stop"]:
+    while not sensor.is_shutting_down and not stop_event.is_set():
         cometd: Optional[CometDSession] = None
         try:
             http_client = sf_client.get_client(params)
             cometd = CometDSession(http_client)
             cometd.handshake()
             cometd.subscribe(channel, replay_id)
-            logger.info(
+            sensor.logger.info(
                 "rule %s subscribed to %s (replay_id=%s)", rule_id, channel, replay_id,
             )
 
-            while not stop["stop"]:
+            while not sensor.is_shutting_down and not stop_event.is_set():
                 replies = cometd.connect()
                 for msg in replies:
                     ch = msg.get("channel")
                     if ch == channel and msg.get("data"):
                         normalised = _normalise_event(channel, msg["data"])
-                        if _sensor_base.post_event(
+                        if emit_event(
+                            sensor,
                             "salesforce.change_event",
                             normalised,
                             trigger_instance_id=instance_id,
@@ -230,52 +237,95 @@ def _run_rule(rule: Dict[str, Any], stop: Dict[str, bool]) -> None:
                         advice = msg.get("advice") or {}
                         if advice.get("reconnect") == "handshake":
                             raise RuntimeError(f"cometd_rehandshake_required: {msg.get('error')}")
-                        logger.warning("rule %s connect unsuccessful: %s", rule_id, msg.get("error"))
+                        sensor.logger.warning("rule %s connect unsuccessful: %s", rule_id, msg.get("error"))
                         time.sleep(1)
 
         except Exception as exc:  # noqa: BLE001
-            logger.warning("rule %s CDC loop error: %s — reconnecting in %ss", rule_id, exc, reconnect)
+            sensor.logger.warning("rule %s CDC loop error: %s — reconnecting in %ss", rule_id, exc, reconnect)
         finally:
             if cometd:
                 cometd.disconnect()
 
-        if stop["stop"]:
+        if sensor.is_shutting_down or stop_event.is_set():
             break
-        _sensor_base.sleep_responsive(reconnect, stop, step=1.0)
+        _sleep_responsive(reconnect, sensor, stop_event, step=1.0)
 
-    logger.info("rule %s CDC thread stopped (last replay_id=%s)", rule_id, replay_id)
+    sensor.logger.info("rule %s CDC thread stopped (last replay_id=%s)", rule_id, replay_id)
+
+
+class ChangeDataCaptureSensor(Sensor):
+    """SDK-managed sensor that keeps one CometD worker thread per rule."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rule_threads: Dict[int, threading.Thread] = {}
+        self._rule_stops: Dict[int, threading.Event] = {}
+        self._threads_lock = threading.Lock()
+
+    def _start_rule_thread(self, rule: RuleState) -> None:
+        self._stop_rule_thread(rule.rule_id)
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=_run_rule,
+            args=(rule, self, stop_event),
+            name=f"cdc-rule-{rule.rule_id}",
+            daemon=True,
+        )
+        with self._threads_lock:
+            self._rule_stops[rule.rule_id] = stop_event
+            self._rule_threads[rule.rule_id] = thread
+        thread.start()
+
+    def _stop_rule_thread(self, rule_id: int) -> None:
+        with self._threads_lock:
+            stop_event = self._rule_stops.pop(rule_id, None)
+            thread = self._rule_threads.pop(rule_id, None)
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+
+    def on_rule_created(self, rule: RuleState) -> None:
+        self._start_rule_thread(rule)
+
+    def on_rule_enabled(self, rule: RuleState) -> None:
+        self._start_rule_thread(rule)
+
+    def on_rule_disabled(self, rule: RuleState) -> None:
+        self._stop_rule_thread(rule.rule_id)
+
+    def on_rule_deleted(self, rule: RuleState) -> None:
+        self._stop_rule_thread(rule.rule_id)
+
+    def on_rule_updated(self, rule: RuleState, old_params: Dict[str, Any]) -> None:  # noqa: ARG002
+        self._start_rule_thread(rule)
+
+    def run(self) -> None:
+        self.logger.info("%s starting with %d rule(s)", self.context.sensor_ref, len(self.rules))
+
+        if not self._rule_threads and not os.environ.get("ATTUNE_MQ_URL"):
+            self.logger.info("%s: no enabled rules — exiting", self.context.sensor_ref)
+            return
+
+        while not self.is_shutting_down:
+            with self._threads_lock:
+                threads = list(self._rule_threads.values())
+            if threads and not any(t.is_alive() for t in threads):
+                self.logger.warning("all CDC worker threads have exited — sensor terminating")
+                break
+            time.sleep(1.0)
+
+        self.logger.info("%s stopped cleanly", self.context.sensor_ref)
+
+    def cleanup(self) -> None:
+        with self._threads_lock:
+            rule_ids = list(self._rule_threads)
+        for rule_id in rule_ids:
+            self._stop_rule_thread(rule_id)
 
 
 def main() -> None:
-    sensor_ref = os.environ.get("ATTUNE_SENSOR_REF", "salesforce.change_data_capture")
-    rules = _sensor_base.load_trigger_instances()
-    logger.info("%s starting with %d rule(s)", sensor_ref, len(rules))
-
-    if not rules:
-        logger.info("%s: no enabled rules — exiting", sensor_ref)
-        return
-
-    stop = _sensor_base.install_shutdown_handler()
-
-    threads: List[threading.Thread] = []
-    for rule in rules:
-        t = threading.Thread(
-            target=_run_rule,
-            args=(rule, stop),
-            name=f"cdc-rule-{rule.get('id')}",
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
-
-    while not stop["stop"]:
-        # Exit early if every worker thread has died.
-        if not any(t.is_alive() for t in threads):
-            logger.warning("all CDC worker threads have exited — sensor terminating")
-            break
-        time.sleep(1.0)
-
-    logger.info("%s stopped cleanly", sensor_ref)
+    run_sensor(ChangeDataCaptureSensor)
 
 
 if __name__ == "__main__":

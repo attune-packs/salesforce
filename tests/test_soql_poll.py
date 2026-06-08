@@ -1,5 +1,6 @@
 """Tests for the soql_poll sensor's pure helpers."""
 
+import asyncio
 import os
 import sys
 
@@ -9,6 +10,7 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "sensors"))
 
 import soql_poll  # noqa: E402
+from _sensor_runtime import RuleState  # noqa: E402
 
 
 def test_format_cursor_iso_passthrough():
@@ -160,6 +162,27 @@ def test_rule_interval_invalid_falls_back_to_default():
     )
 
 
+def test_rule_interval_accepts_sdk_rule_state():
+    rule = RuleState(
+        rule_id=123,
+        rule_ref="rule.ref",
+        trigger_ref="salesforce.soql_record",
+        trigger_params={"poll_interval_seconds": 90},
+    )
+    assert soql_poll._rule_interval(rule) == 90.0
+
+
+def test_rule_config_accepts_sdk_rule_state():
+    rule = RuleState(
+        rule_id=123,
+        rule_ref="rule.ref",
+        trigger_ref="salesforce.soql_record",
+        trigger_params={"sobject": "Account"},
+    )
+    assert soql_poll._rule_id(rule) == 123
+    assert soql_poll._rule_config(rule) == {"sobject": "Account"}
+
+
 def test_transient_error_types_include_httpx_and_os():
     types = soql_poll.TRANSIENT_ERROR_TYPES
     assert ConnectionError in types
@@ -168,3 +191,24 @@ def test_transient_error_types_include_httpx_and_os():
     import asyncio as _aio
 
     assert _aio.TimeoutError in types or TimeoutError in types
+
+
+def test_run_rule_with_backoff_uses_exponential_delay(monkeypatch):
+    async def fake_process(*_args, **_kwargs):
+        raise TimeoutError("temporary")
+
+    monkeypatch.setattr(soql_poll, "_process_one_rule_async", fake_process)
+    monkeypatch.setattr(soql_poll.time, "monotonic", lambda: 1000.0)
+    rule = RuleState(
+        rule_id=123,
+        rule_ref="rule.ref",
+        trigger_ref="salesforce.soql_record",
+        trigger_params={"poll_interval_seconds": 60, "sobject": "Account"},
+    )
+    state = {"next_due_at": 1000.0, "consecutive_failures": 0}
+
+    asyncio.run(soql_poll._run_rule_with_backoff(rule, state))
+    assert state == {"next_due_at": 1060.0, "consecutive_failures": 1}
+
+    asyncio.run(soql_poll._run_rule_with_backoff(rule, state))
+    assert state == {"next_due_at": 1120.0, "consecutive_failures": 2}

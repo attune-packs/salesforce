@@ -63,10 +63,10 @@ meta:
     - streaming
     - bulk-api
   python_dependencies:
+    - "attune-sdk[sensor]>=0.1.0,<0.2.0"
     - "sf-toolkit>=0.5"
-    - "httpx>=0.26"
+    - "httpx>=0.27"
     - "PyJWT[crypto]>=2.8"
-    - "cryptography>=42"
   documentation_url: "https://androxxtraxxon.github.io/python-sf-toolkit/"
 
 tags:

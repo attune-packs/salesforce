@@ -15,7 +15,7 @@ toolkit provides:
 The Attune-specific contributions in this module are:
 
 * Resolving an action/sensor's ``credential_key`` parameter to a
-  credential blob stored in the Attune keystore.
+  credential blob stored in the Attune keystore using the Attune SDK client.
 * Persisting refreshed access tokens back to the keystore (under a
   derived ref ``<credential_key>_session_token``) via the toolkit's
   ``token_refresh_callback`` so sibling worker processes can skip the
@@ -24,9 +24,10 @@ The Attune-specific contributions in this module are:
   API through the same ``SalesforceClient`` (so we never re-authenticate
   separately and never spin up a second HTTP client).
 
-This module uses ``httpx`` directly for the small set of Attune API calls
-(GET/PUT/POST against the keystore). ``httpx`` is listed explicitly in
-``requirements.txt``.
+This module uses ``attune-sdk`` for action stdin/stdout helpers, execution
+context, and generated keystore API calls. Raw artifact endpoints still go
+through the SDK's authenticated ``httpx`` client until typed artifact helpers
+are available in the SDK.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time
 from typing import Any, Dict, Iterable, Iterator, List, NoReturn, Optional, Tuple
 
@@ -49,7 +49,7 @@ DEFAULT_API_VERSION = "v60.0"
 # headroom for in-flight requests near the boundary.
 DEFAULT_TOKEN_MAX_AGE_SECONDS = 90 * 60
 
-# Default httpx timeout for keystore round-trips.
+# Default httpx timeout for Attune API round-trips.
 _KEYSTORE_TIMEOUT = httpx.Timeout(15.0)
 
 # Fields we forward into sf_toolkit.lazy_login(). Any extra keys in the
@@ -78,22 +78,40 @@ class ConfigError(Exception):
 
 
 def read_params() -> Dict[str, Any]:
-    raw = sys.stdin.read().strip()
-    if not raw:
-        return {}
     try:
-        return json.loads(raw)
+        from attune.action import read_params as _read_params  # type: ignore
+    except ImportError:
+        import sys
+
+        raw = sys.stdin.read().strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"invalid_input_json: {exc}") from exc
+    try:
+        return _read_params()
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid_input_json: {exc}") from exc
 
 
 def emit(payload: Dict[str, Any]) -> None:
-    json.dump(payload, sys.stdout, default=str)
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    try:
+        from attune.action import emit_result  # type: ignore
+    except ImportError:
+        import sys
+
+        json.dump(payload, sys.stdout, default=str)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return
+    emit_result(payload)
 
 
 def fail(msg: str, **extra: Any) -> NoReturn:
+    import sys
+
     body: Dict[str, Any] = {"ok": False, "error": msg}
     body.update(extra)
     emit(body)
@@ -135,13 +153,19 @@ def to_plain(record: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Attune API helpers (keystore reads/writes via httpx)
+# Attune API helpers (SDK first, direct httpx fallback for local tests)
 # ---------------------------------------------------------------------------
 
 
 def _attune_env() -> Tuple[str, str]:
-    api_url = os.environ.get("ATTUNE_API_URL")
-    api_token = os.environ.get("ATTUNE_API_TOKEN")
+    try:
+        import attune  # type: ignore
+    except ImportError:
+        api_url = os.environ.get("ATTUNE_API_URL")
+        api_token = os.environ.get("ATTUNE_API_TOKEN")
+    else:
+        api_url = attune.context.api_url
+        api_token = attune.context.api_token
     if not api_url or not api_token:
         raise ConfigError(
             "missing_attune_env: ATTUNE_API_URL and ATTUNE_API_TOKEN required to "
@@ -155,11 +179,76 @@ def _auth_header() -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _fetch_keystore_value(ref: str) -> Optional[Any]:
+def _attune_sdk_client() -> Optional[Any]:
+    try:
+        import attune  # type: ignore
+    except ImportError:
+        return None
+    try:
+        return attune.context.client
+    except RuntimeError as exc:
+        raise ConfigError(
+            "missing_attune_env: ATTUNE_API_URL and ATTUNE_API_TOKEN required to "
+            "resolve credentials/session via the keystore"
+        ) from exc
+
+
+def _attune_http_request(
+    method: str,
+    path: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    json_body: Any = None,
+    timeout: httpx.Timeout = _KEYSTORE_TIMEOUT,
+) -> httpx.Response:
+    client = _attune_sdk_client()
+    if client is not None:
+        return client.get_httpx_client().request(
+            method,
+            path,
+            headers=headers,
+            json=json_body,
+            timeout=timeout,
+        )
+
     api_url, _ = _attune_env()
-    resp = httpx.get(
-        f"{api_url}/api/v1/keys/{ref}",
-        headers={**_auth_header(), "Accept": "application/json"},
+    merged_headers = {**_auth_header(), **(headers or {})}
+    url = f"{api_url}{path}"
+    method_l = method.lower()
+    if method_l == "get":
+        return httpx.get(url, headers=merged_headers, timeout=timeout)
+    if method_l == "put":
+        return httpx.put(url, headers=merged_headers, json=json_body, timeout=timeout)
+    if method_l == "post":
+        return httpx.post(url, headers=merged_headers, json=json_body, timeout=timeout)
+    return httpx.request(
+        method,
+        url,
+        headers=merged_headers,
+        json=json_body,
+        timeout=timeout,
+    )
+
+
+def _fetch_keystore_value(ref: str) -> Optional[Any]:
+    client = _attune_sdk_client()
+    if client is not None:
+        from attune.api_client.api.secrets import get_key  # type: ignore
+
+        result = get_key.sync_detailed(ref, client=client)
+        status = int(result.status_code)
+        if status == 404:
+            return None
+        if status >= 400:
+            raise ConfigError(
+                f"keystore_lookup_failed ref={ref} status={status} body={result.content[:300]!r}"
+            )
+        return getattr(result.parsed.data, "value", None) if result.parsed else None
+
+    resp = _attune_http_request(
+        "GET",
+        f"/api/v1/keys/{ref}",
+        headers={"Accept": "application/json"},
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code == 404:
@@ -193,11 +282,30 @@ def _fetch_credential_from_keystore(ref: str) -> Dict[str, Any]:
 
 def _put_keystore_value(ref: str, value: Any, *, encrypted: bool = True) -> bool:
     """PUT /api/v1/keys/{ref}. Returns True if updated, False if not found."""
-    api_url, _ = _attune_env()
-    resp = httpx.put(
-        f"{api_url}/api/v1/keys/{ref}",
-        headers={**_auth_header(), "Content-Type": "application/json"},
-        json={"value": value, "encrypted": encrypted},
+    client = _attune_sdk_client()
+    if client is not None:
+        from attune.api_client.api.secrets import update_key  # type: ignore
+        from attune.api_client.models.update_key_request import UpdateKeyRequest  # type: ignore
+
+        result = update_key.sync_detailed(
+            ref,
+            client=client,
+            body=UpdateKeyRequest(value=value, encrypted=encrypted),
+        )
+        status = int(result.status_code)
+        if status == 404:
+            return False
+        if status >= 400:
+            raise ConfigError(
+                f"keystore_update_failed ref={ref} status={status} body={result.content[:300]!r}"
+            )
+        return True
+
+    resp = _attune_http_request(
+        "PUT",
+        f"/api/v1/keys/{ref}",
+        headers={"Content-Type": "application/json"},
+        json_body={"value": value, "encrypted": encrypted},
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code == 404:
@@ -217,11 +325,38 @@ def _post_keystore_key(
     pack_ref: str,
     encrypted: bool = True,
 ) -> None:
-    api_url, _ = _attune_env()
-    resp = httpx.post(
-        f"{api_url}/api/v1/keys",
-        headers={**_auth_header(), "Content-Type": "application/json"},
-        json={
+    client = _attune_sdk_client()
+    if client is not None:
+        from attune.api_client.api.secrets import create_key  # type: ignore
+        from attune.api_client.models.create_key_request import CreateKeyRequest  # type: ignore
+        from attune.api_client.models.owner_type import OwnerType  # type: ignore
+
+        result = create_key.sync_detailed(
+            client=client,
+            body=CreateKeyRequest(
+                ref=ref,
+                name=name,
+                owner_type=OwnerType.PACK,
+                owner_pack_ref=pack_ref,
+                value=value,
+                encrypted=encrypted,
+            ),
+        )
+        status = int(result.status_code)
+        if status == 409:
+            _put_keystore_value(ref, value, encrypted=encrypted)
+            return
+        if status >= 400:
+            raise ConfigError(
+                f"keystore_create_failed ref={ref} status={status} body={result.content[:300]!r}"
+            )
+        return
+
+    resp = _attune_http_request(
+        "POST",
+        "/api/v1/keys",
+        headers={"Content-Type": "application/json"},
+        json_body={
             "ref": ref,
             "name": name,
             "owner_type": "pack",
@@ -272,7 +407,6 @@ def allocate_file_artifact_version(
     `file_path`, ...) verbatim so the caller can stash the IDs in their
     emit payload.
     """
-    api_url, _ = _attune_env()
     if execution_id is None:
         env_exec = os.environ.get("ATTUNE_EXEC_ID")
         if env_exec:
@@ -299,14 +433,14 @@ def allocate_file_artifact_version(
     if description is not None:
         payload["description"] = description
 
-    resp = httpx.post(
-        f"{api_url}/api/v1/artifacts/ref/{artifact_ref}/versions/file",
+    resp = _attune_http_request(
+        "POST",
+        f"/api/v1/artifacts/ref/{artifact_ref}/versions/file",
         headers={
-            **_auth_header(),
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
-        json=payload,
+        json_body=payload,
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code >= 400:
@@ -332,15 +466,15 @@ def _get_artifact_metadata(*, ref: Optional[str] = None, artifact_id: Optional[i
     """GET /api/v1/artifacts/ref/{ref} or /api/v1/artifacts/{id}."""
     if not ref and artifact_id is None:
         raise ConfigError("artifact_lookup_failed: ref or artifact_id required")
-    api_url, _ = _attune_env()
     path = (
         f"/api/v1/artifacts/ref/{ref}"
         if ref
         else f"/api/v1/artifacts/{int(artifact_id)}"
     )
-    resp = httpx.get(
-        f"{api_url}{path}",
-        headers={**_auth_header(), "Accept": "application/json"},
+    resp = _attune_http_request(
+        "GET",
+        path,
+        headers={"Accept": "application/json"},
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code == 404:
@@ -355,11 +489,11 @@ def _get_artifact_metadata(*, ref: Optional[str] = None, artifact_id: Optional[i
 
 def _get_artifact_version(artifact_id: int, version: Optional[int] = None) -> Dict[str, Any]:
     """Fetch a specific version (or the latest) of an artifact."""
-    api_url, _ = _attune_env()
     sub = f"versions/{int(version)}" if version is not None else "versions/latest"
-    resp = httpx.get(
-        f"{api_url}/api/v1/artifacts/{int(artifact_id)}/{sub}",
-        headers={**_auth_header(), "Accept": "application/json"},
+    resp = _attune_http_request(
+        "GET",
+        f"/api/v1/artifacts/{int(artifact_id)}/{sub}",
+        headers={"Accept": "application/json"},
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code == 404:
@@ -425,11 +559,10 @@ def read_artifact_records(
                 return _records_from_json_value(json.load(fh))
 
     # Last resort: download via API
-    api_url, _ = _attune_env()
     sub = f"versions/{int(version)}/download" if version is not None else "download"
-    resp = httpx.get(
-        f"{api_url}/api/v1/artifacts/{int(artifact_id)}/{sub}",
-        headers=_auth_header(),
+    resp = _attune_http_request(
+        "GET",
+        f"/api/v1/artifacts/{int(artifact_id)}/{sub}",
         timeout=_KEYSTORE_TIMEOUT,
     )
     if resp.status_code >= 400:

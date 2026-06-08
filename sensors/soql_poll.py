@@ -22,12 +22,12 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import _sensor_base
+from _sensor_runtime import RuleState, Sensor, emit_event, run_sensor
 from lib import sf_client
 
-logger = _sensor_base.configure_logging()
+logger = logging.getLogger("salesforce.soql_poll")
 
 DEFAULT_QUERY_TIMEOUT = 300.0
 DEFAULT_POLL_INTERVAL = 60.0
@@ -213,6 +213,20 @@ def _resolve_soql_template(cfg: Dict[str, Any]) -> str | None:
     return _build_soql_template(cfg)
 
 
+def _rule_id(rule: RuleState | Dict[str, Any]) -> int:
+    if isinstance(rule, dict):
+        return int(rule.get("id", rule.get("rule_id", 0)))
+    return int(rule.rule_id)
+
+
+def _rule_config(rule: RuleState | Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(rule, dict):
+        cfg = rule.get("config", rule.get("trigger_params", {})) or {}
+    else:
+        cfg = rule.trigger_params or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 async def _run_query_async(
     params: Dict[str, Any], soql: str, query_all: bool
 ) -> List[Dict[str, Any]]:
@@ -227,18 +241,23 @@ async def _run_query_async(
     return out
 
 
-async def _process_one_rule_async(rule: Dict[str, Any]) -> Tuple[int, int]:
+async def _process_one_rule_async(
+    rule: RuleState | Dict[str, Any],
+    *,
+    sensor: Optional[Sensor] = None,
+    log: Optional[logging.Logger] = None,
+) -> Tuple[int, int]:
     """Run one tick for a single rule. Returns ``(events_emitted, errors)``.
 
-    All Salesforce I/O is awaited; ``post_event`` (sync ``httpx.post``) is
-    dispatched via ``asyncio.to_thread`` so concurrent rules don't serialise
-    on event delivery either.
+    All Salesforce I/O is awaited; event POSTs are dispatched via
+    ``asyncio.to_thread`` so concurrent rules don't serialise on delivery.
     """
-    rule_id = int(rule.get("id", 0))
-    cfg_in = rule.get("config") or {}
+    active_logger = log or logger
+    rule_id = _rule_id(rule)
+    cfg_in = _rule_config(rule)
     soql_template = _resolve_soql_template(cfg_in)
     if not soql_template:
-        logger.warning(
+        active_logger.warning(
             "rule %s: missing 'soql' (or 'sobject' for structured query) in trigger config — skipping",
             rule_id,
         )
@@ -275,17 +294,17 @@ async def _process_one_rule_async(rule: Dict[str, Any]) -> Tuple[int, int]:
             timeout=query_timeout,
         )
     except asyncio.TimeoutError:
-        logger.warning(
+        active_logger.warning(
             "rule %s: query exceeded query_timeout_seconds=%.1f — skipping tick",
             rule_id,
             query_timeout,
         )
         raise
     except TRANSIENT_ERROR_TYPES as exc:
-        logger.warning("rule %s: transient query error (will back off): %s", rule_id, exc)
+        active_logger.warning("rule %s: transient query error (will back off): %s", rule_id, exc)
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning("rule %s: query failed: %s", rule_id, exc)
+        active_logger.warning("rule %s: query failed: %s", rule_id, exc)
         return (0, 1)
 
     fresh = [r for r in records if r.get(id_field) not in seen_ids]
@@ -313,7 +332,8 @@ async def _process_one_rule_async(rule: Dict[str, Any]) -> Tuple[int, int]:
 
     if mode == "batch":
         ok = await asyncio.to_thread(
-            _sensor_base.post_event,
+            emit_event,
+            sensor,
             "salesforce.soql_batch",
             {
                 "sobject": sobject,
@@ -329,7 +349,8 @@ async def _process_one_rule_async(rule: Dict[str, Any]) -> Tuple[int, int]:
     # per_record mode — fan event POSTs out concurrently.
     coros = [
         asyncio.to_thread(
-            _sensor_base.post_event,
+            emit_event,
+            sensor,
             "salesforce.soql_record",
             {
                 "sobject": sobject,
@@ -349,7 +370,7 @@ async def _process_one_rule_async(rule: Dict[str, Any]) -> Tuple[int, int]:
     for r in results:
         if isinstance(r, Exception):
             errors += 1
-            logger.warning("rule %s: post_event failed: %s", rule_id, r)
+            active_logger.warning("rule %s: post_event failed: %s", rule_id, r)
         elif r:
             emitted += 1
     return (emitted, errors)
@@ -360,17 +381,21 @@ def _process_one_rule(rule: Dict[str, Any]) -> Tuple[int, int]:
     return asyncio.run(_process_one_rule_async(rule))
 
 
-async def _async_sleep_responsive(seconds: float, stop: Dict[str, Any], step: float = 1.0) -> None:
-    """``asyncio``-friendly counterpart of ``_sensor_base.sleep_responsive``."""
+async def _async_sleep_responsive(
+    seconds: float,
+    sensor: Sensor,
+    step: float = 1.0,
+) -> None:
+    """Sleep in short chunks so SDK shutdown signals are observed promptly."""
     remaining = max(0.0, float(seconds))
-    while remaining > 0 and not stop.get("stop"):
+    while remaining > 0 and not sensor.is_shutting_down:
         chunk = min(step, remaining)
         await asyncio.sleep(chunk)
         remaining -= chunk
 
 
-def _rule_interval(rule: Dict[str, Any]) -> float:
-    cfg = rule.get("config") or {}
+def _rule_interval(rule: RuleState | Dict[str, Any]) -> float:
+    cfg = _rule_config(rule)
     raw = cfg.get("poll_interval_seconds")
     if raw is None:
         raw = cfg.get("poll_interval")
@@ -384,7 +409,11 @@ def _rule_interval(rule: Dict[str, Any]) -> float:
 
 
 async def _run_rule_with_backoff(
-    rule: Dict[str, Any], rule_state: Dict[str, Any]
+    rule: RuleState | Dict[str, Any],
+    rule_state: Dict[str, Any],
+    *,
+    sensor: Optional[Sensor] = None,
+    log: Optional[logging.Logger] = None,
 ) -> None:
     """Run one tick for a rule and update its ``rule_state`` book-keeping.
 
@@ -393,17 +422,18 @@ async def _run_rule_with_backoff(
     poll interval (capped at ``MAX_BACKOFF_MULTIPLIER``). On a clean tick
     the failure counter resets.
     """
-    rid = rule.get("id")
+    active_logger = log or logger
+    rid = _rule_id(rule)
     interval = _rule_interval(rule)
     try:
-        emitted, errors = await _process_one_rule_async(rule)
+        emitted, errors = await _process_one_rule_async(rule, sensor=sensor, log=active_logger)
     except TRANSIENT_ERROR_TYPES as exc:
         rule_state["consecutive_failures"] = rule_state.get("consecutive_failures", 0) + 1
         n = rule_state["consecutive_failures"]
         multiplier = min(MAX_BACKOFF_MULTIPLIER, BACKOFF_BASE ** (n - 1))
         delay = interval * multiplier
         rule_state["next_due_at"] = time.monotonic() + delay
-        logger.warning(
+        active_logger.warning(
             "rule %s: transient failure #%d (%s) — next attempt in %.1fs",
             rid,
             n,
@@ -413,75 +443,29 @@ async def _run_rule_with_backoff(
         return
     except Exception as exc:  # noqa: BLE001
         # Programming / config errors — schedule normally, just log loudly.
-        logger.exception("rule %s tick crashed: %s", rid, exc)
+        active_logger.exception("rule %s tick crashed: %s", rid, exc)
         rule_state["next_due_at"] = time.monotonic() + interval
         return
 
     rule_state["consecutive_failures"] = 0
     rule_state["next_due_at"] = time.monotonic() + interval
     if emitted:
-        logger.info("rule %s emitted %d event(s)", rid, emitted)
+        active_logger.info("rule %s emitted %d event(s)", rid, emitted)
     if errors:
-        logger.warning("rule %s tick had %d error(s)", rid, errors)
+        active_logger.warning("rule %s tick had %d error(s)", rid, errors)
 
 
-async def _async_main() -> None:
-    sensor_ref = os.environ.get("ATTUNE_SENSOR_REF", "salesforce.soql_poll")
-    rules = _sensor_base.load_trigger_instances()
-    logger.info("%s starting with %d rule(s)", sensor_ref, len(rules))
+class SoqlPollSensor(Sensor):
+    """SDK-managed sensor with this pack's custom per-rule scheduler."""
 
-    if not rules:
-        logger.info("%s: no enabled rules — exiting", sensor_ref)
-        return
+    def __init__(self) -> None:
+        super().__init__()
+        self._schedule: Dict[int, Dict[str, Any]] = {}
 
-    stop = _sensor_base.install_shutdown_handler()
-
-    # Per-rule scheduling: each rule has its own next-due time so a
-    # 5-minute rule isn't dragged into a 60-second sibling's cadence.
-    schedule: Dict[Any, Dict[str, Any]] = {
-        rule.get("id"): {"next_due_at": time.monotonic(), "consecutive_failures": 0}
-        for rule in rules
-    }
-
-    try:
-        while not stop["stop"]:
-            now = time.monotonic()
-            due_rules = [
-                rule for rule in rules
-                if schedule[rule.get("id")]["next_due_at"] <= now
-            ]
-
-            if due_rules:
-                try:
-                    await asyncio.gather(
-                        *[
-                            _run_rule_with_backoff(rule, schedule[rule.get("id")])
-                            for rule in due_rules
-                        ],
-                        return_exceptions=False,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # _run_rule_with_backoff swallows everything, but be
-                    # paranoid: this loop is supposed to live forever.
-                    logger.exception("scheduler tick crashed: %s", exc)
-
-            # Sleep until the next rule is due (or 1s, whichever is sooner)
-            # so shutdown signals are honored quickly.
-            now = time.monotonic()
-            next_due = min(s["next_due_at"] for s in schedule.values())
-            sleep_for = max(0.0, min(next_due - now, 60.0))
-            if sleep_for <= 0:
-                # Yield to event loop to avoid a hot-spin if a rule's
-                # interval is misconfigured to <= 0.
-                await asyncio.sleep(0.05)
-            else:
-                await _async_sleep_responsive(sleep_for, stop, step=1.0)
-    finally:
-        # Best-effort: close any registered AsyncSalesforceClients so the
-        # process exits cleanly without dangling httpx connections.
+    async def _close_salesforce_clients(self, rules: List[RuleState]) -> None:
         seen: set[str] = set()
         for rule in rules:
-            cfg = rule.get("config") or {}
+            cfg = _rule_config(rule)
             try:
                 key = sf_client._connection_name(cfg)
             except Exception:
@@ -492,12 +476,72 @@ async def _async_main() -> None:
             try:
                 await sf_client.close_async_client(cfg)
             except Exception as exc:  # noqa: BLE001
-                logger.debug("close_async_client(%s) failed: %s", key, exc)
-        logger.info("%s stopped cleanly", sensor_ref)
+                self.logger.debug("close_async_client(%s) failed: %s", key, exc)
+
+    async def _async_run(self) -> None:
+        self.logger.info("%s starting with %d rule(s)", self.context.sensor_ref, len(self.rules))
+
+        try:
+            while not self.is_shutting_down:
+                rules = [rule for rule in self.rules.values() if rule.enabled]
+                if not rules and not os.environ.get("ATTUNE_MQ_URL"):
+                    self.logger.info("%s: no enabled rules — exiting", self.context.sensor_ref)
+                    return
+
+                now = time.monotonic()
+                active_ids = {_rule_id(rule) for rule in rules}
+                for rule_id in list(self._schedule):
+                    if rule_id not in active_ids:
+                        self._schedule.pop(rule_id, None)
+                for rule in rules:
+                    self._schedule.setdefault(
+                        _rule_id(rule),
+                        {"next_due_at": now, "consecutive_failures": 0},
+                    )
+
+                due_rules = [
+                    rule for rule in rules
+                    if self._schedule[_rule_id(rule)]["next_due_at"] <= now
+                ]
+
+                if due_rules:
+                    try:
+                        await asyncio.gather(
+                            *[
+                                _run_rule_with_backoff(
+                                    rule,
+                                    self._schedule[_rule_id(rule)],
+                                    sensor=self,
+                                    log=self.logger,
+                                )
+                                for rule in due_rules
+                            ],
+                            return_exceptions=False,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.exception("scheduler tick crashed: %s", exc)
+
+                if not self._schedule:
+                    await _async_sleep_responsive(1.0, self, step=1.0)
+                    continue
+
+                now = time.monotonic()
+                next_due = min(s["next_due_at"] for s in self._schedule.values())
+                sleep_for = max(0.0, min(next_due - now, 60.0))
+                if sleep_for <= 0:
+                    await asyncio.sleep(0.05)
+                else:
+                    await _async_sleep_responsive(sleep_for, self, step=1.0)
+        finally:
+            await self._close_salesforce_clients(list(self.rules.values()))
+            self.logger.info("%s stopped cleanly", self.context.sensor_ref)
+
+    def run(self) -> None:
+        asyncio.run(self._async_run())
 
 
 def main() -> None:
-    asyncio.run(_async_main())
+    run_sensor(SoqlPollSensor)
 
 
 if __name__ == "__main__":
