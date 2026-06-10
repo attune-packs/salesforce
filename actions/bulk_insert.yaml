@@ -18,8 +18,13 @@ output_format: json
 parameters:
   credential_key:
     type: string
-    required: true
     description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  credentials:
+    type: object
+    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+  connection_name:
+    type: string
+    description: "Optional in-process connection cache name when using direct credentials. Defaults to a hash of the credential fields."
   instance_url:
     { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
   api_version:

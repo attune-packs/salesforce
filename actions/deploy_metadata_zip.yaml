@@ -1,0 +1,109 @@
+ref: salesforce.deploy_metadata_zip
+label: "Deploy Salesforce Metadata ZIP"
+description: "Deploy a zipped Salesforce metadata package to an org and monitor until Salesforce reports terminal deployment status."
+enabled: true
+workflow_file: workflows/deploy_metadata_zip.workflow.yaml
+
+parameters:
+  credential_key:
+    type: string
+    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+  credentials:
+    type: object
+    description: "Optional Salesforce credentials object. Takes precedence over credential_key."
+  connection_name:
+    type: string
+    description: "Optional in-process Salesforce connection cache name when using direct credentials."
+  instance_url:
+    type: string
+    description: "Optional explicit Salesforce instance URL."
+  api_version:
+    type: string
+    default: "v60.0"
+
+  username: { type: string, description: "Optional top-level Salesforce login field." }
+  password: { type: string, description: "Optional top-level Salesforce login field." }
+  consumer_key: { type: string, description: "Optional top-level Salesforce login field." }
+  consumer_secret: { type: string, description: "Optional top-level Salesforce login field." }
+  client_id: { type: string, description: "Alias for consumer_key when direct credentials are supplied as top-level fields." }
+  client_secret: { type: string, description: "Alias for consumer_secret when direct credentials are supplied as top-level fields." }
+  private_key: { type: string, description: "Optional top-level Salesforce JWT private key." }
+  domain: { type: string, description: "Optional Salesforce login domain, such as login or test." }
+  security_token: { type: string, description: "Optional Salesforce password-flow security token." }
+  sf_cli_alias: { type: string, description: "Optional Salesforce CLI alias for sf-toolkit login." }
+  sf_exec_path: { type: string, description: "Optional Salesforce CLI executable path." }
+  organizationId: { type: string, description: "Optional Salesforce org id for supported auth flows." }
+
+  org:
+    type: string
+    description: "Human-readable org identifier copied into emitted deployment lifecycle events."
+  metadata_zip_artifact_ref:
+    type: string
+    description: "Attune artifact ref containing the zipped Salesforce metadata package. Required if metadata_zip_artifact_id is not provided."
+  metadata_zip_artifact_id:
+    type: integer
+    description: "Attune artifact ID containing the zipped Salesforce metadata package. Required if metadata_zip_artifact_ref is not provided."
+  metadata_zip_artifact_version:
+    type: integer
+    description: "Optional artifact version. Defaults to latest."
+
+  allow_missing_files: { type: boolean, default: false }
+  auto_update_package: { type: boolean, default: false }
+  check_only: { type: boolean, default: false }
+  ignore_warnings: { type: boolean, default: false }
+  perform_retrieve: { type: boolean, default: false }
+  purge_on_delete: { type: boolean, default: false }
+  rollback_on_error: { type: boolean, default: true }
+  single_package: { type: boolean, default: true }
+  test_level:
+    type: string
+    default: "NoTestRun"
+    enum: [NoTestRun, RunSpecifiedTests, RunLocalTests, RunAllTestsInOrg]
+  run_tests:
+    type: array
+    default: []
+
+  monitor_poll_interval_seconds:
+    type: number
+    default: 15
+  monitor_timeout_seconds:
+    type: integer
+    default: 3600
+  start_task_timeout_seconds:
+    type: integer
+    default: 300
+  monitor_task_timeout_seconds:
+    type: integer
+    default: 3900
+  success_on_partial:
+    type: boolean
+    default: false
+
+  result_artifact_ref:
+    type: string
+    description: "Optional stable Attune artifact ref for the final JSON deployment result."
+  result_artifact_visibility:
+    type: string
+  result_artifact_retention_limit:
+    type: integer
+    default: 10
+  event_trigger_ref:
+    type: string
+    default: "salesforce.metadata_deploy_status"
+  event_trigger_instance_id:
+    type: string
+
+output:
+  ok: { type: boolean }
+  deploy_id: { type: string }
+  org: { type: string }
+  status: { type: string }
+  done: { type: boolean }
+  success: { type: boolean }
+  monitoring_timed_out: { type: boolean }
+  summary: { type: object }
+  artifact: { type: object }
+  component_errors: { type: array }
+  test_errors: { type: array }
+
+tags: [salesforce, metadata, deployment, workflow]

@@ -1,0 +1,44 @@
+ref: salesforce.metadata_deploy_status
+label: "Salesforce Metadata Deployment Status"
+description: "Emitted when a Salesforce metadata deployment is requested and whenever meaningful deployment status details change."
+enabled: true
+
+type: event
+
+output:
+  event_type:
+    type: string
+    description: "deployment_requested, deployment_status_changed, or deployment_terminal."
+  deploy_id:
+    type: string
+    required: true
+    description: "Salesforce Metadata API deployment id."
+  org:
+    type: string
+    required: true
+    description: "Salesforce org identifier supplied by the workflow or inferred from credentials."
+  status:
+    type: string
+    description: "Salesforce deployment status."
+  done:
+    type: boolean
+  success:
+    type: boolean
+  counts:
+    type: object
+    description: "Component and test processed/total/error counts."
+  component_error_count:
+    type: integer
+  test_error_count:
+    type: integer
+  component_errors:
+    type: array
+  test_errors:
+    type: array
+  check_only:
+    type: boolean
+  metadata_zip_artifact:
+    type: object
+    description: "Artifact reference for the source metadata ZIP, present on deployment_requested events."
+
+tags: [salesforce, metadata, deployment, event]

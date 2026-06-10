@@ -183,6 +183,135 @@ def test_rule_config_accepts_sdk_rule_state():
     assert soql_poll._rule_config(rule) == {"sobject": "Account"}
 
 
+def test_event_metadata_only_includes_present_fields():
+    assert soql_poll._event_metadata({}) == {}
+    assert soql_poll._event_metadata({"query_tag": "users", "source": "sf_access_control"}) == {
+        "query_tag": "users",
+        "source": "sf_access_control",
+    }
+
+
+def test_process_one_rule_per_record_metadata_passthrough(monkeypatch, tmp_path):
+    monkeypatch.setenv("ATTUNE_SENSOR_STATE_DIR", str(tmp_path))
+
+    async def fake_run_query(_params, _soql, _query_all):
+        return [{"Id": "001", "SystemModstamp": "2026-01-01T00:00:01Z"}]
+
+    emitted = []
+
+    def fake_emit_event(sensor, trigger_ref, payload, trigger_instance_id=None):
+        emitted.append((sensor, trigger_ref, payload, trigger_instance_id))
+        return True
+
+    monkeypatch.setattr(soql_poll, "_run_query_async", fake_run_query)
+    monkeypatch.setattr(soql_poll, "emit_event", fake_emit_event)
+
+    emitted_count, errors = asyncio.run(
+        soql_poll._process_one_rule_async(
+            {
+                "id": 123,
+                "config": {
+                    "sobject": "Account",
+                    "cursor_initial": "2026-01-01T00:00:00Z",
+                    "query_tag": "access-users",
+                    "event_tag": "user-change",
+                    "source": "sf_access_control",
+                },
+            }
+        )
+    )
+
+    assert (emitted_count, errors) == (1, 0)
+    assert len(emitted) == 1
+    _, trigger_ref, payload, trigger_instance_id = emitted[0]
+    assert trigger_ref == "salesforce.soql_record"
+    assert trigger_instance_id == "rule_123"
+    assert payload["query_tag"] == "access-users"
+    assert payload["event_tag"] == "user-change"
+    assert payload["source"] == "sf_access_control"
+    assert payload["record"]["Id"] == "001"
+
+
+def test_process_one_rule_batch_metadata_passthrough(monkeypatch, tmp_path):
+    monkeypatch.setenv("ATTUNE_SENSOR_STATE_DIR", str(tmp_path))
+
+    async def fake_run_query(_params, _soql, _query_all):
+        return [
+            {"Id": "001", "SystemModstamp": "2026-01-01T00:00:01Z"},
+            {"Id": "002", "SystemModstamp": "2026-01-01T00:00:02Z"},
+        ]
+
+    emitted = []
+
+    def fake_emit_event(sensor, trigger_ref, payload, trigger_instance_id=None):
+        emitted.append((sensor, trigger_ref, payload, trigger_instance_id))
+        return True
+
+    monkeypatch.setattr(soql_poll, "_run_query_async", fake_run_query)
+    monkeypatch.setattr(soql_poll, "emit_event", fake_emit_event)
+
+    emitted_count, errors = asyncio.run(
+        soql_poll._process_one_rule_async(
+            {
+                "id": 456,
+                "config": {
+                    "sobject": "Account",
+                    "mode": "batch",
+                    "cursor_initial": "2026-01-01T00:00:00Z",
+                    "query_tag": "access-groups",
+                    "event_tag": "membership-change",
+                    "source": "sf_access_control",
+                },
+            }
+        )
+    )
+
+    assert (emitted_count, errors) == (1, 0)
+    assert len(emitted) == 1
+    _, trigger_ref, payload, trigger_instance_id = emitted[0]
+    assert trigger_ref == "salesforce.soql_batch"
+    assert trigger_instance_id == "rule_456"
+    assert payload["query_tag"] == "access-groups"
+    assert payload["event_tag"] == "membership-change"
+    assert payload["source"] == "sf_access_control"
+    assert payload["count"] == 2
+    assert [record["Id"] for record in payload["records"]] == ["001", "002"]
+
+
+def test_process_one_rule_omits_absent_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("ATTUNE_SENSOR_STATE_DIR", str(tmp_path))
+
+    async def fake_run_query(_params, _soql, _query_all):
+        return [{"Id": "001", "SystemModstamp": "2026-01-01T00:00:01Z"}]
+
+    emitted = []
+
+    def fake_emit_event(sensor, trigger_ref, payload, trigger_instance_id=None):
+        emitted.append(payload)
+        return True
+
+    monkeypatch.setattr(soql_poll, "_run_query_async", fake_run_query)
+    monkeypatch.setattr(soql_poll, "emit_event", fake_emit_event)
+
+    emitted_count, errors = asyncio.run(
+        soql_poll._process_one_rule_async(
+            {
+                "id": 789,
+                "config": {
+                    "sobject": "Account",
+                    "cursor_initial": "2026-01-01T00:00:00Z",
+                },
+            }
+        )
+    )
+
+    assert (emitted_count, errors) == (1, 0)
+    assert len(emitted) == 1
+    assert "query_tag" not in emitted[0]
+    assert "event_tag" not in emitted[0]
+    assert "source" not in emitted[0]
+
+
 def test_transient_error_types_include_httpx_and_os():
     types = soql_poll.TRANSIENT_ERROR_TYPES
     assert ConnectionError in types

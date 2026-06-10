@@ -1,0 +1,113 @@
+version: "1.0.0"
+
+vars:
+  deploy_id: null
+  org: null
+  start_status: null
+
+tasks:
+  - name: start_deploy
+    action: salesforce.start_metadata_deploy
+    permission_set_refs:
+      - standard
+    timeout: "{{ parameters.start_task_timeout_seconds }}"
+    retry:
+      count: 2
+      delay: 10
+      backoff: exponential
+      max_delay: 60
+    input:
+      credential_key: "{{ parameters.credential_key }}"
+      credentials: "{{ parameters.credentials }}"
+      connection_name: "{{ parameters.connection_name }}"
+      instance_url: "{{ parameters.instance_url }}"
+      api_version: "{{ parameters.api_version }}"
+      username: "{{ parameters.username }}"
+      password: "{{ parameters.password }}"
+      consumer_key: "{{ parameters.consumer_key }}"
+      consumer_secret: "{{ parameters.consumer_secret }}"
+      client_id: "{{ parameters.client_id }}"
+      client_secret: "{{ parameters.client_secret }}"
+      private_key: "{{ parameters.private_key }}"
+      domain: "{{ parameters.domain }}"
+      security_token: "{{ parameters.security_token }}"
+      sf_cli_alias: "{{ parameters.sf_cli_alias }}"
+      sf_exec_path: "{{ parameters.sf_exec_path }}"
+      organizationId: "{{ parameters.organizationId }}"
+      org: "{{ parameters.org }}"
+      metadata_zip_artifact_ref: "{{ parameters.metadata_zip_artifact_ref }}"
+      metadata_zip_artifact_id: "{{ parameters.metadata_zip_artifact_id }}"
+      metadata_zip_artifact_version: "{{ parameters.metadata_zip_artifact_version }}"
+      allow_missing_files: "{{ parameters.allow_missing_files }}"
+      auto_update_package: "{{ parameters.auto_update_package }}"
+      check_only: "{{ parameters.check_only }}"
+      ignore_warnings: "{{ parameters.ignore_warnings }}"
+      perform_retrieve: "{{ parameters.perform_retrieve }}"
+      purge_on_delete: "{{ parameters.purge_on_delete }}"
+      rollback_on_error: "{{ parameters.rollback_on_error }}"
+      single_package: "{{ parameters.single_package }}"
+      test_level: "{{ parameters.test_level }}"
+      run_tests: "{{ parameters.run_tests }}"
+      event_trigger_ref: "{{ parameters.event_trigger_ref }}"
+      event_trigger_instance_id: "{{ parameters.event_trigger_instance_id }}"
+    next:
+      - when: "{{ succeeded() }}"
+        publish:
+          - deploy_id: "{{ result().deploy_id }}"
+          - org: "{{ result().org }}"
+          - start_status: "{{ result().status }}"
+        do:
+          - monitor_deploy
+
+  - name: monitor_deploy
+    action: salesforce.monitor_metadata_deploy
+    permission_set_refs:
+      - standard
+    timeout: "{{ parameters.monitor_task_timeout_seconds }}"
+    retry:
+      count: 2
+      delay: 15
+      backoff: exponential
+      max_delay: 120
+    input:
+      credential_key: "{{ parameters.credential_key }}"
+      credentials: "{{ parameters.credentials }}"
+      connection_name: "{{ parameters.connection_name }}"
+      instance_url: "{{ parameters.instance_url }}"
+      api_version: "{{ parameters.api_version }}"
+      username: "{{ parameters.username }}"
+      password: "{{ parameters.password }}"
+      consumer_key: "{{ parameters.consumer_key }}"
+      consumer_secret: "{{ parameters.consumer_secret }}"
+      client_id: "{{ parameters.client_id }}"
+      client_secret: "{{ parameters.client_secret }}"
+      private_key: "{{ parameters.private_key }}"
+      domain: "{{ parameters.domain }}"
+      security_token: "{{ parameters.security_token }}"
+      sf_cli_alias: "{{ parameters.sf_cli_alias }}"
+      sf_exec_path: "{{ parameters.sf_exec_path }}"
+      organizationId: "{{ parameters.organizationId }}"
+      org: "{{ workflow.org }}"
+      deploy_id: "{{ workflow.deploy_id }}"
+      poll_interval_seconds: "{{ parameters.monitor_poll_interval_seconds }}"
+      timeout_seconds: "{{ parameters.monitor_timeout_seconds }}"
+      success_on_partial: "{{ parameters.success_on_partial }}"
+      check_only: "{{ parameters.check_only }}"
+      result_artifact_ref: "{{ parameters.result_artifact_ref }}"
+      result_artifact_visibility: "{{ parameters.result_artifact_visibility }}"
+      result_artifact_retention_limit: "{{ parameters.result_artifact_retention_limit }}"
+      event_trigger_ref: "{{ parameters.event_trigger_ref }}"
+      event_trigger_instance_id: "{{ parameters.event_trigger_instance_id }}"
+
+output_map:
+  ok: "{{ task.monitor_deploy.result.ok }}"
+  deploy_id: "{{ workflow.deploy_id }}"
+  org: "{{ task.monitor_deploy.result.org }}"
+  status: "{{ task.monitor_deploy.result.status }}"
+  done: "{{ task.monitor_deploy.result.done }}"
+  success: "{{ task.monitor_deploy.result.success }}"
+  monitoring_timed_out: "{{ task.monitor_deploy.result.monitoring_timed_out }}"
+  summary: "{{ task.monitor_deploy.result.summary }}"
+  artifact: "{{ task.monitor_deploy.result.artifact }}"
+  component_errors: "{{ task.monitor_deploy.result.component_errors }}"
+  test_errors: "{{ task.monitor_deploy.result.test_errors }}"

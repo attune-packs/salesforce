@@ -37,6 +37,13 @@ email: "integrations@attune.io"
 #          token_refresh_callback writes to whenever the access token is
 #          (re)issued — letting subsequent processes skip the login round
 #          trip while the cached token is still fresh.
+#   3. Alternatively, pass a `credentials` object directly to an action or
+#      trigger/sensor rule. This object mirrors `sf_toolkit.lazy_login`
+#      kwargs and may include aliases such as `client_id` / `client_secret`.
+#      Direct credentials take precedence over `credential_key` and are useful
+#      when another pack owns the stored key. Direct credentials use only
+#      in-process connection caching; session-token persistence remains tied to
+#      `credential_key` because it writes pack-owned keystore entries.
 conf_schema:
   credential_key:
     type: string

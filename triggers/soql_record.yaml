@@ -8,8 +8,13 @@ type: event
 parameters:
   credential_key:
     type: string
-    required: true
     description: "Pack-scoped Attune key holding the Salesforce credential object passed to sf_toolkit.lazy_login."
+  credentials:
+    type: object
+    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+  connection_name:
+    type: string
+    description: "Optional in-process connection cache name when using direct credentials. Defaults to a hash of the credential fields."
   api_version:
     type: string
     description: "Salesforce REST API version (e.g. 'v60.0'). Defaults to the Salesforce org's latest available version."
@@ -67,6 +72,17 @@ parameters:
     description: "Per-tick query timeout. The tick is skipped if the query takes longer"
     default: 300
 
+  # ---- Optional event metadata passthrough ----
+  query_tag:
+    type: string
+    description: "Optional caller-defined query label copied into emitted salesforce.soql_record events."
+  event_tag:
+    type: string
+    description: "Optional caller-defined event label copied into emitted salesforce.soql_record events."
+  source:
+    type: string
+    description: "Optional caller-defined source identifier copied into emitted salesforce.soql_record events."
+
 output:
   sobject:
     type: string
@@ -81,5 +97,14 @@ output:
   query:
     type: string
     description: "The SOQL query that produced this record."
+  query_tag:
+    type: string
+    description: "Optional query label copied from the rule trigger configuration when provided."
+  event_tag:
+    type: string
+    description: "Optional event label copied from the rule trigger configuration when provided."
+  source:
+    type: string
+    description: "Optional source identifier copied from the rule trigger configuration when provided."
 
 tags: [salesforce, soql, polling]

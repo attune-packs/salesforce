@@ -53,6 +53,15 @@ except Exception:  # noqa: BLE001
     pass
 
 
+async def _to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run sync work in a thread, with a fallback for older Python runtimes."""
+    to_thread = getattr(asyncio, "to_thread", None)
+    if to_thread is not None:
+        return await to_thread(func, *args, **kwargs)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+
 def _state_dir() -> str:
     return os.environ.get("ATTUNE_SENSOR_STATE_DIR") or "/tmp"
 
@@ -227,6 +236,11 @@ def _rule_config(rule: RuleState | Dict[str, Any]) -> Dict[str, Any]:
     return cfg if isinstance(cfg, dict) else {}
 
 
+def _event_metadata(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return optional passthrough metadata configured on the trigger rule."""
+    return {key: cfg[key] for key in ("query_tag", "event_tag", "source") if key in cfg}
+
+
 async def _run_query_async(
     params: Dict[str, Any], soql: str, query_all: bool
 ) -> List[Dict[str, Any]]:
@@ -329,37 +343,45 @@ async def _process_one_rule_async(
 
     sobject = _infer_sobject(soql_template)
     instance_id = f"rule_{rule_id}"
+    event_metadata = _event_metadata(cfg_in)
 
     if mode == "batch":
-        ok = await asyncio.to_thread(
+        payload = {
+            "sobject": sobject,
+            "records": fresh,
+            "count": len(fresh),
+            "query": soql,
+            "cursor_value": str(new_cursor) if new_cursor is not None else None,
+        }
+        payload.update(event_metadata)
+        ok = await _to_thread(
             emit_event,
             sensor,
             "salesforce.soql_batch",
-            {
-                "sobject": sobject,
-                "records": fresh,
-                "count": len(fresh),
-                "query": soql,
-                "cursor_value": str(new_cursor) if new_cursor is not None else None,
-            },
+            payload,
             trigger_instance_id=instance_id,
         )
         return (int(bool(ok)), 0)
 
     # per_record mode — fan event POSTs out concurrently.
+    def _record_payload(rec: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {
+            "sobject": sobject,
+            "record": rec,
+            "cursor_value": str(rec.get(cursor_field))
+            if rec.get(cursor_field) is not None
+            else None,
+            "query": soql,
+        }
+        payload.update(event_metadata)
+        return payload
+
     coros = [
-        asyncio.to_thread(
+        _to_thread(
             emit_event,
             sensor,
             "salesforce.soql_record",
-            {
-                "sobject": sobject,
-                "record": rec,
-                "cursor_value": str(rec.get(cursor_field))
-                if rec.get(cursor_field) is not None
-                else None,
-                "query": soql,
-            },
+            _record_payload(rec),
             trigger_instance_id=instance_id,
         )
         for rec in fresh

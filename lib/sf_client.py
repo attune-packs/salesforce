@@ -14,12 +14,13 @@ toolkit provides:
 
 The Attune-specific contributions in this module are:
 
-* Resolving an action/sensor's ``credential_key`` parameter to a
-  credential blob stored in the Attune keystore using the Attune SDK client.
-* Persisting refreshed access tokens back to the keystore (under a
-  derived ref ``<credential_key>_session_token``) via the toolkit's
+* Resolving an action/sensor's direct ``credentials`` input or
+  ``credential_key`` parameter to a Salesforce credential blob.
+* Persisting refreshed access tokens back to the keystore for
+  ``credential_key``-backed connections (under a derived ref
+  ``<credential_key>_session_token``) via the toolkit's
   ``token_refresh_callback`` so sibling worker processes can skip the
-  initial login round-trip.
+  initial login round-trip. Direct credentials use only in-process caching.
 * A ``sf_request(...)`` convenience that targets the Salesforce REST
   API through the same ``SalesforceClient`` (so we never re-authenticate
   separately and never spin up a second HTTP client).
@@ -32,6 +33,7 @@ are available in the SDK.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -462,6 +464,47 @@ def artifacts_dir() -> str:
     return val
 
 
+def emit_attune_event(
+    trigger_ref: str,
+    payload: Dict[str, Any],
+    *,
+    trigger_instance_id: Optional[str] = None,
+    timeout: float = 30.0,
+) -> bool:
+    """Emit an Attune event from an action.
+
+    Actions use this for deployment lifecycle events. Event emission is
+    best-effort: failures are logged and reported to the caller as ``False``
+    but do not make the Salesforce operation fail.
+    """
+    body: Dict[str, Any] = {"trigger_ref": trigger_ref, "payload": payload}
+    if trigger_instance_id:
+        body["trigger_instance_id"] = trigger_instance_id
+    try:
+        resp = _attune_http_request(
+            "POST",
+            "/api/v1/events",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json_body=body,
+            timeout=httpx.Timeout(float(timeout)),
+        )
+        if resp.status_code >= 400:
+            logger.warning(
+                "emit_attune_event failed trigger_ref=%s status=%s body=%s",
+                trigger_ref,
+                resp.status_code,
+                resp.text[:300],
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 - event emission is non-critical
+        logger.warning("emit_attune_event failed trigger_ref=%s: %s", trigger_ref, exc)
+        return False
+
+
 def _get_artifact_metadata(*, ref: Optional[str] = None, artifact_id: Optional[int] = None) -> Dict[str, Any]:
     """GET /api/v1/artifacts/ref/{ref} or /api/v1/artifacts/{id}."""
     if not ref and artifact_id is None:
@@ -505,6 +548,48 @@ def _get_artifact_version(artifact_id: int, version: Optional[int] = None) -> Di
             f"artifact_version_failed status={resp.status_code} body={resp.text[:300]}"
         )
     return resp.json().get("data", {})
+
+
+def read_file_artifact_bytes(
+    *,
+    ref: Optional[str] = None,
+    artifact_id: Optional[int] = None,
+    version: Optional[int] = None,
+) -> Tuple[bytes, Dict[str, Any], Dict[str, Any]]:
+    """Resolve a file-backed Attune artifact and return its bytes.
+
+    Returns ``(content, artifact_metadata, version_metadata)``. Reads
+    file-backed versions directly from ``ATTUNE_ARTIFACTS_DIR`` and falls
+    back to the artifact download endpoint when no file path is present.
+    """
+    if ref is None and artifact_id is None:
+        raise ConfigError("read_file_artifact_bytes: ref or artifact_id required")
+
+    meta: Dict[str, Any]
+    if artifact_id is None:
+        meta = _get_artifact_metadata(ref=ref)
+        artifact_id = int(meta["id"])
+    else:
+        meta = _get_artifact_metadata(artifact_id=int(artifact_id))
+
+    ver = _get_artifact_version(int(artifact_id), version=version)
+    file_path = ver.get("file_path")
+    if file_path:
+        full = os.path.join(artifacts_dir(), file_path)
+        with open(full, "rb") as fh:
+            return fh.read(), meta, ver
+
+    sub = f"versions/{int(version)}/download" if version is not None else "download"
+    resp = _attune_http_request(
+        "GET",
+        f"/api/v1/artifacts/{int(artifact_id)}/{sub}",
+        timeout=_KEYSTORE_TIMEOUT,
+    )
+    if resp.status_code >= 400:
+        raise ConfigError(
+            f"artifact_download_failed status={resp.status_code} body={resp.text[:300]}"
+        )
+    return resp.content, meta, ver
 
 
 def read_artifact_records(
@@ -709,18 +794,71 @@ def _save_cached_token(connection_name: str, token: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _credentials_from_input(action_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return Salesforce credentials supplied directly in action/sensor input."""
+    value = action_params.get("credentials")
+    if value in (None, ""):
+        login_kwargs = _filter_login_kwargs(action_params)
+        return login_kwargs or None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"credentials_not_object: expected JSON object string: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"credentials_not_object: expected object, got {type(value).__name__}"
+        )
+    return value
+
+
+def _direct_connection_name(creds: Dict[str, Any], action_params: Dict[str, Any]) -> str:
+    explicit = action_params.get("connection_name")
+    if explicit is not None:
+        explicit_name = str(explicit).strip()
+        if explicit_name:
+            return explicit_name
+    login_kwargs = _filter_login_kwargs(creds)
+    fingerprint = json.dumps(login_kwargs, sort_keys=True, default=str)
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return f"direct:{digest}"
+
+
 def _connection_name(action_params: Dict[str, Any]) -> str:
+    direct_creds = _credentials_from_input(action_params)
+    if direct_creds is not None:
+        name = _direct_connection_name(direct_creds, action_params)
+    else:
+        name = (
+            action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
+        )
+    name = str(name).strip()
+    if not name:
+        raise ConfigError(
+            "missing_salesforce_credentials: pass `credentials` (a Salesforce "
+            "credential object), top-level Salesforce login fields, `credential_key` "
+            "(a pack-scoped Attune keystore ref pointing at a JSON credential "
+            "object), or set SF_CREDENTIAL_KEY"
+        )
+    return name
+
+
+def _resolve_credentials(action_params: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
+    direct_creds = _credentials_from_input(action_params)
+    if direct_creds is not None:
+        return _direct_connection_name(direct_creds, action_params), direct_creds, False
+
     name = (
         action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
     )
     name = str(name).strip()
     if not name:
         raise ConfigError(
-            "missing_credential_key: pass `credential_key` (a pack-scoped Attune "
-            "keystore ref pointing at a JSON credential object), or set "
-            "SF_CREDENTIAL_KEY"
+            "missing_salesforce_credentials: pass `credentials` (a Salesforce "
+            "credential object), top-level Salesforce login fields, `credential_key`, "
+            "or set SF_CREDENTIAL_KEY"
         )
-    return name
+    return name, _fetch_credential_from_keystore(name), True
 
 
 def _api_version(action_params: Dict[str, Any]) -> str:
@@ -756,23 +894,26 @@ def _filter_login_kwargs(creds: Dict[str, Any]) -> Dict[str, Any]:
 def get_client(action_params: Dict[str, Any]) -> Any:
     """Return a registered sf_toolkit.SalesforceClient for this credential.
 
-    Connection name is the keystore ref (``credential_key``). Resolution
-    order on a cold call:
+    Connection name is the keystore ref (``credential_key``), an explicit
+    ``connection_name`` for direct credentials, or a stable hash of the direct
+    credential fields. Resolution order on a cold call:
       1. Return existing in-process registration if one exists.
-      2. Load credential blob from keystore via ``credential_key``.
-      3. Try to load a still-fresh session token from the keystore so
-         sf-toolkit can skip the initial login.
+      2. Use direct credentials from input, or load the credential blob from
+         keystore via ``credential_key``.
+      3. For keystore-backed credentials, try to load a still-fresh session
+         token from the keystore so sf-toolkit can skip the initial login.
       4. Build & register ``SalesforceClient(connection_name=..., login=...,
          token=cached_or_None, token_refresh_callback=save_to_keystore)``.
 
     sf-toolkit handles in-process token refresh and triggers our callback
-    on every refresh so the keystore stays fresh for sibling processes.
+    on every refresh; the callback persists only when the connection came from
+    ``credential_key``.
 
     Returns an ``httpx.Client`` subclass — callers can use ``.get(url)``,
     ``.post(url, json=...)``, ``.put(url, content=...)``, etc. directly,
     with bearer auth injected by the toolkit.
     """
-    name = _connection_name(action_params)
+    name, creds, use_keystore_cache = _resolve_credentials(action_params)
 
     try:
         from sf_toolkit import SalesforceClient  # type: ignore
@@ -791,7 +932,6 @@ def get_client(action_params: Dict[str, Any]) -> Any:
         return existing
 
     # 2) Credentials
-    creds = _fetch_credential_from_keystore(name)
     login_kwargs = _filter_login_kwargs(creds)
     if not login_kwargs:
         raise ConfigError(
@@ -800,10 +940,12 @@ def get_client(action_params: Dict[str, Any]) -> Any:
         )
 
     # 3) Cached session token (best-effort, optional)
-    cached_token = _load_cached_token(name, action_params)
+    cached_token = _load_cached_token(name, action_params) if use_keystore_cache else None
 
     # 4) Build the toolkit client
     def _refresh_callback(token: Any) -> None:
+        if not use_keystore_cache:
+            return
         try:
             _save_cached_token(name, token)
         except Exception as exc:  # never let caching break the request
@@ -923,16 +1065,15 @@ def sf_request(
 def get_async_client(action_params: Dict[str, Any]) -> Any:
     """Return a registered ``sf_toolkit.AsyncSalesforceClient``.
 
-    Uses the credential ref suffixed with ``:async`` as the connection
-    name so it is registered separately from the sync client (the
-    toolkit's class-level connection registry is shared across both
-    client types). Token caching, refresh callbacks, and lazy-login work
-    identically to ``get_client``.
+    Uses the resolved base connection name suffixed with ``:async`` so it is
+    registered separately from the sync client (the toolkit's class-level
+    connection registry is shared across both client types). Token caching,
+    refresh callbacks, and lazy-login work identically to ``get_client``.
 
     Returns an ``httpx.AsyncClient`` subclass — callers should ``await``
     its ``.get / .post / .request`` methods.
     """
-    base_name = _connection_name(action_params)
+    base_name, creds, use_keystore_cache = _resolve_credentials(action_params)
     async_name = f"{base_name}:async"
 
     try:
@@ -950,7 +1091,6 @@ def get_async_client(action_params: Dict[str, Any]) -> Any:
     if existing is not None:
         return existing
 
-    creds = _fetch_credential_from_keystore(base_name)
     login_kwargs = _filter_login_kwargs(creds)
     if not login_kwargs:
         raise ConfigError(
@@ -958,9 +1098,11 @@ def get_async_client(action_params: Dict[str, Any]) -> Any:
             f"(expected one of {sorted(_LAZY_LOGIN_FIELDS)})"
         )
 
-    cached_token = _load_cached_token(base_name, action_params)
+    cached_token = _load_cached_token(base_name, action_params) if use_keystore_cache else None
 
     def _refresh_callback(token: Any) -> None:
+        if not use_keystore_cache:
+            return
         try:
             _save_cached_token(base_name, token)
         except Exception as exc:

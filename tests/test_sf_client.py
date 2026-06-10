@@ -82,10 +82,70 @@ def test_connection_name_falls_back_to_env(monkeypatch):
     assert sf_client._connection_name({}) == "from-env"
 
 
+def test_connection_name_from_direct_credentials(monkeypatch):
+    monkeypatch.setenv("SF_CREDENTIAL_KEY", "from-env")
+    params = {
+        "credentials": {
+            "client_id": "ck",
+            "client_secret": "cs",
+            "username": "u@example.com",
+        }
+    }
+
+    name = sf_client._connection_name(params)
+
+    assert name.startswith("direct:")
+    assert sf_client._connection_name(params) == name
+
+
+def test_connection_name_uses_explicit_direct_connection_name(monkeypatch):
+    monkeypatch.delenv("SF_CREDENTIAL_KEY", raising=False)
+
+    assert sf_client._connection_name({
+        "connection_name": "shared-salesforce",
+        "credentials": {"client_id": "ck", "client_secret": "cs"},
+    }) == "shared-salesforce"
+
+
 def test_connection_name_missing_raises(monkeypatch):
     monkeypatch.delenv("SF_CREDENTIAL_KEY", raising=False)
-    with pytest.raises(sf_client.ConfigError, match="missing_credential_key"):
+    with pytest.raises(sf_client.ConfigError, match="missing_salesforce_credentials"):
         sf_client._connection_name({})
+
+
+def test_resolve_credentials_prefers_direct_input(monkeypatch):
+    monkeypatch.setattr(
+        sf_client,
+        "_fetch_credential_from_keystore",
+        lambda ref: pytest.fail(f"unexpected keystore lookup for {ref}"),
+    )
+
+    name, creds, use_keystore_cache = sf_client._resolve_credentials({
+        "credential_key": "pack-owned-key",
+        "credentials": {"client_id": "ck", "client_secret": "cs"},
+    })
+
+    assert name.startswith("direct:")
+    assert creds == {"client_id": "ck", "client_secret": "cs"}
+    assert use_keystore_cache is False
+
+
+def test_resolve_credentials_accepts_top_level_login_fields(monkeypatch):
+    monkeypatch.delenv("SF_CREDENTIAL_KEY", raising=False)
+
+    name, creds, use_keystore_cache = sf_client._resolve_credentials({
+        "client_id": "ck",
+        "client_secret": "cs",
+        "domain": "test",
+    })
+
+    assert name.startswith("direct:")
+    assert creds == {
+        "consumer_key": "ck",
+        "consumer_secret": "cs",
+        "domain": "test",
+    }
+    assert use_keystore_cache is False
 
 
 # ---------------------------------------------------------------------------
