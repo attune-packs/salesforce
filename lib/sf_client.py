@@ -812,12 +812,7 @@ def _credentials_from_input(action_params: Dict[str, Any]) -> Optional[Dict[str,
     return value
 
 
-def _direct_connection_name(creds: Dict[str, Any], action_params: Dict[str, Any]) -> str:
-    explicit = action_params.get("connection_name")
-    if explicit is not None:
-        explicit_name = str(explicit).strip()
-        if explicit_name:
-            return explicit_name
+def _direct_connection_name(creds: Dict[str, Any]) -> str:
     login_kwargs = _filter_login_kwargs(creds)
     fingerprint = json.dumps(login_kwargs, sort_keys=True, default=str)
     digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
@@ -827,7 +822,7 @@ def _direct_connection_name(creds: Dict[str, Any], action_params: Dict[str, Any]
 def _connection_name(action_params: Dict[str, Any]) -> str:
     direct_creds = _credentials_from_input(action_params)
     if direct_creds is not None:
-        name = _direct_connection_name(direct_creds, action_params)
+        name = _direct_connection_name(direct_creds)
     else:
         name = (
             action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
@@ -846,7 +841,7 @@ def _connection_name(action_params: Dict[str, Any]) -> str:
 def _resolve_credentials(action_params: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
     direct_creds = _credentials_from_input(action_params)
     if direct_creds is not None:
-        return _direct_connection_name(direct_creds, action_params), direct_creds, False
+        return _direct_connection_name(direct_creds), direct_creds, False
 
     name = (
         action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
@@ -873,6 +868,26 @@ def get_api_version(action_params: Dict[str, Any]) -> str:
     return _api_version(action_params)
 
 
+def _api_version_path(action_params: Dict[str, Any]) -> str:
+    version = str(_api_version(action_params)).strip()
+    if not version:
+        version = DEFAULT_API_VERSION
+    if not version.lower().startswith("v"):
+        version = f"v{version}"
+    return f"/services/data/{version}"
+
+
+def _resolve_rest_url(action_params: Dict[str, Any], path: str) -> str:
+    if path.startswith(("http://", "https://", "/")):
+        return path
+    return f"{_api_version_path(action_params)}/{path.lstrip('/')}"
+
+
+def get_rest_url(action_params: Dict[str, Any], path: str) -> str:
+    """Public helper for building Salesforce REST URLs safely."""
+    return _resolve_rest_url(action_params, path)
+
+
 def _filter_login_kwargs(creds: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k in _LAZY_LOGIN_FIELDS:
@@ -894,9 +909,8 @@ def _filter_login_kwargs(creds: Dict[str, Any]) -> Dict[str, Any]:
 def get_client(action_params: Dict[str, Any]) -> Any:
     """Return a registered sf_toolkit.SalesforceClient for this credential.
 
-    Connection name is the keystore ref (``credential_key``), an explicit
-    ``connection_name`` for direct credentials, or a stable hash of the direct
-    credential fields. Resolution order on a cold call:
+    Connection name is the keystore ref (``credential_key``), or a stable hash
+    of the direct credential fields. Resolution order on a cold call:
       1. Return existing in-process registration if one exists.
       2. Use direct credentials from input, or load the credential blob from
          keystore via ``credential_key``.
@@ -1020,18 +1034,15 @@ def sf_request(
 ) -> Any:
     """Call the Salesforce REST API and return parsed JSON.
 
-    ``path`` is interpreted relative to the org's data URL
-    (``/services/data/{api_version}``). Pass an absolute URL (``http(s)://``
-    or starting with ``/services/...``) to bypass the data-url prefix.
+    ``path`` is interpreted relative to ``/services/data/{api_version}``.
+    Pass an absolute URL (``http(s)://``) or leading slash path to bypass
+    this prefix.
 
     Returns parsed JSON, ``None`` for 204/empty bodies, or ``str`` for
     non-JSON success bodies. Raises ``RuntimeError`` on >=400 status.
     """
     client = get_client(action_params)
-    if path.startswith(("http://", "https://", "/")):
-        url = path
-    else:
-        url = f"{client.data_url}/{path.lstrip('/')}"
+    url = _resolve_rest_url(action_params, path)
 
     resp = client.request(
         method.upper(),
@@ -1164,10 +1175,7 @@ async def sf_request_async(
     from sf_toolkit.exceptions import SalesforceError  # type: ignore
 
     client = get_async_client(action_params)
-    if path.startswith(("http://", "https://", "/")):
-        url = path
-    else:
-        url = f"{client.data_url}/{path.lstrip('/')}"
+    url = _resolve_rest_url(action_params, path)
 
     try:
         resp = await client.request(

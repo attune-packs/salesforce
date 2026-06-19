@@ -128,5 +128,22 @@ and best for large data loads.
 
 > **PushTopic:** PushTopic is the legacy Streaming API. Modern Salesforce
 > orgs should use Change Data Capture instead, which this pack supports.
-> The `change_data_capture` sensor connects to channels such as
-> `/data/AccountChangeEvent` or `/data/ChangeEvents` (all CDC events).
+> The `change_data_capture` sensor can target one or more objects via
+> `objects: ["Account", "Contact"]`, or subscribe to all CDC traffic with
+> explicit `all_events: true` (`/data/ChangeEvents`).
+
+### `salesforce.change_event` payload fields
+
+| Field | Meaning |
+|---|---|
+| `change_type` | CDC operation type (`CREATE`, `UPDATE`, `DELETE`, `UNDELETE`, or `GAP_*`). |
+| `entity_name` | Salesforce object API name for the event (`Account`, `Contact`, `Custom__c`, etc.). |
+| `record_ids` | One or more Salesforce record IDs affected by the change. |
+| `changed_fields` | Field API names changed in this event (typically populated for updates). |
+| `commit_timestamp` | Commit timestamp from Salesforce (milliseconds since epoch). |
+| `commit_user` | Salesforce user ID that committed the change. |
+| `transaction_key` | Transaction identifier shared by events from the same transaction. |
+| `sequence_number` | Event order within the transaction. |
+| `replay_id` | Replay cursor for resumable subscriptions. |
+| `channel` | CDC channel that delivered the event (`/data/AccountChangeEvent`, etc.). |
+| `payload` | Raw Salesforce CDC payload (`ChangeEventHeader` + object field data). |

@@ -1,4 +1,4 @@
-attune-sdk[sensor]>=0.1.0,<0.2.0
+attune-sdk[sensor]>=0.1.0
 sf-toolkit>=0.5
 # httpx is also a transitive dep of attune-sdk and sf-toolkit (SalesforceClient
 # subclasses httpx.Client). We list it explicitly because non-JSON Salesforce

@@ -9,6 +9,10 @@ parameter_delivery: stdin
 parameter_format: json
 output_format: json
 
+default_execution_permission_set_refs:
+  - standard
+
+
 parameters:
   credential_key:
     type: string
@@ -16,9 +20,6 @@ parameters:
   credentials:
     type: object
     description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
-  connection_name:
-    type: string
-    description: "Optional in-process connection cache name when using direct credentials. Defaults to a hash of the credential fields."
   instance_url:
     { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
   api_version:

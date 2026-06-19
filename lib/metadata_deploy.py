@@ -26,7 +26,7 @@ def api_version_number(params: Dict[str, Any]) -> str:
 
 
 def org_identifier(params: Dict[str, Any], client: Optional[Any] = None) -> str:
-    for key in ("org", "org_alias", "instance_url", "connection_name", "credential_key"):
+    for key in ("org", "org_alias", "instance_url", "credential_key"):
         value = params.get(key)
         if value not in (None, ""):
             return str(value)
@@ -105,12 +105,13 @@ def _extract_session_id(client: Any) -> Optional[str]:
     return None
 
 
-def _force_login(client: Any) -> None:
+def _force_login(client: Any, params: Dict[str, Any]) -> None:
     """Force sf-toolkit's lazy auth so the SOAP SessionHeader can be filled."""
+    limits_url = sf_client.get_rest_url(params, "limits")
     try:
         client.request(
             "GET",
-            f"{client.data_url}/limits",
+            limits_url,
             headers={"Accept": "application/json"},
             timeout=30.0,
             response_status_raise=False,
@@ -118,7 +119,7 @@ def _force_login(client: Any) -> None:
     except TypeError:
         client.request(
             "GET",
-            f"{client.data_url}/limits",
+            limits_url,
             headers={"Accept": "application/json"},
             timeout=30.0,
         )
@@ -153,7 +154,7 @@ def metadata_soap_request(
     client = sf_client.get_client(params)
     session_id = _extract_session_id(client)
     if not session_id:
-        _force_login(client)
+        _force_login(client, params)
         session_id = _extract_session_id(client)
 
     url = f"/services/Soap/m/{api_version_number(params)}"

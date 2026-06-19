@@ -52,7 +52,7 @@ def _ids_from_soql(params: Dict[str, Any], soql: str) -> List[str]:
     import csv
     import io as _io
 
-    base = f"{client.data_url}/jobs/query/{job_id}/results"
+    base = sf_client.get_rest_url(params, f"jobs/query/{job_id}/results")
     locator = None
     ids: List[str] = []
     while True:

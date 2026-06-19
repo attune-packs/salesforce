@@ -28,7 +28,7 @@ def _stream_results_to_file(
     summary with byte/row counts.
     """
     client = sf_client.get_client(params)
-    base = f"{client.data_url}/jobs/query/{job_id}/results"
+    base = sf_client.get_rest_url(params, f"jobs/query/{job_id}/results")
     locator: Optional[str] = None
     rows = 0
     bytes_written = 0

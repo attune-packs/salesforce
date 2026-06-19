@@ -23,9 +23,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
-from typing import Any, Dict, Optional
+import traceback
+from typing import Any, Dict, List, Optional
 
 from _sensor_runtime import RuleState, Sensor, emit_event, run_sensor
 from lib import sf_client
@@ -40,6 +42,10 @@ def _state_dir() -> str:
 def _state_path(rule_id: int, channel: str) -> str:
     safe = channel.replace("/", "_").strip("_")
     return os.path.join(_state_dir(), f"sf_cdc_rule_{rule_id}_{safe}.json")
+
+
+def _state_map_path(rule_id: int) -> str:
+    return os.path.join(_state_dir(), f"sf_cdc_rule_{rule_id}_replay_map.json")
 
 
 def _load_replay(path: str) -> Optional[int]:
@@ -59,6 +65,82 @@ def _save_replay(path: str, replay_id: int) -> None:
     os.replace(tmp, path)
 
 
+def _load_replay_map(path: str) -> Dict[str, int]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    replay_ids = data.get("replay_ids")
+    if not isinstance(replay_ids, dict):
+        return {}
+    result: Dict[str, int] = {}
+    for channel, replay_id in replay_ids.items():
+        if isinstance(channel, str):
+            try:
+                result[channel] = int(replay_id)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def _save_replay_map(path: str, replay_ids: Dict[str, int]) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"replay_ids": replay_ids}, fh)
+    os.replace(tmp, path)
+
+
+def _resolve_object_channel(obj_name: str) -> str:
+    obj = obj_name.strip()
+    if not obj:
+        raise ValueError("empty object name")
+    if obj in ("ChangeEvents", "*", "/data/ChangeEvents"):
+        raise ValueError("use all_events=true for catch-all CDC subscription")
+    if obj.startswith("/data/"):
+        return obj
+    if obj.endswith("__c"):
+        return f"/data/{obj[:-3]}__ChangeEvent"
+    return f"/data/{obj}ChangeEvent"
+
+
+def _resolve_channels(cfg_in: Dict[str, Any]) -> List[str]:
+    raw_channel = cfg_in.get("channel")
+    has_channel = isinstance(raw_channel, str) and raw_channel.strip() != ""
+    objects = cfg_in.get("objects")
+    if isinstance(objects, list) and not objects:
+        raise ValueError("invalid objects: provide at least one object API name")
+    has_objects = isinstance(objects, list) and len(objects) > 0
+    all_events = bool(cfg_in.get("all_events"))
+
+    selected_modes = int(has_channel) + int(has_objects) + int(all_events)
+    if selected_modes == 0:
+        raise ValueError("missing selector: set exactly one of channel, objects, or all_events=true")
+    if selected_modes > 1:
+        raise ValueError("ambiguous selector: channel, objects, and all_events are mutually exclusive")
+
+    if has_channel:
+        return [raw_channel.strip()]
+    if all_events:
+        return ["/data/ChangeEvents"]
+
+    assert isinstance(objects, list)
+    channels = []
+    for value in objects:
+        if not isinstance(value, str):
+            raise ValueError("invalid objects: every entry must be a string object API name")
+        channels.append(_resolve_object_channel(value))
+
+    deduped: List[str] = []
+    seen = set()
+    for channel in channels:
+        if channel in seen:
+            raise ValueError(f"duplicate object/channel resolves to {channel}")
+        seen.add(channel)
+        deduped.append(channel)
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Minimal CometD client — handshake / subscribe / connect long-poll loop
 # ---------------------------------------------------------------------------
@@ -73,11 +155,11 @@ class CometDSession:
     rewrites it to ``<instance>/cometd/<version>`` on first request.
     """
 
-    def __init__(self, http_client: Any):
+    def __init__(self, http_client: Any, *, default_api_version: str):
         self.client = http_client
         # The CometD endpoint sits OUTSIDE /services/data/, so use the
         # ApiVersion's numeric label (e.g. "60.0") rather than data_url.
-        version = http_client.api_version.label
+        version = _cometd_version_label(http_client, default_api_version)
         self.endpoint = f"/cometd/{version}"
         self.client_id: Optional[str] = None
         self._msg_id = 0
@@ -101,14 +183,17 @@ class CometDSession:
             raise RuntimeError(f"cometd_invalid_json: {exc}: {resp.text[:200]}") from exc
         return data if isinstance(data, list) else [data]
 
-    def handshake(self) -> None:
-        replies = self._send([{
+    def handshake(self, replay_map: Optional[Dict[str, int]] = None) -> None:
+        payload: Dict[str, Any] = {
             "channel": "/meta/handshake",
             "version": "1.0",
             "supportedConnectionTypes": ["long-polling"],
             "minimumVersion": "1.0",
             "id": self._next_id(),
-        }])
+        }
+        if replay_map:
+            payload["ext"] = {"replay": replay_map}
+        replies = self._send([payload])
         for r in replies:
             if r.get("channel") == "/meta/handshake":
                 if not r.get("successful"):
@@ -186,21 +271,59 @@ def _sleep_responsive(seconds: float, sensor: Sensor, stop_event: threading.Even
         time.sleep(min(step, max(0.0, end - time.time())))
 
 
+def _normalise_api_version(version: str) -> str:
+    v = str(version).strip()
+    if v.lower().startswith("v"):
+        return v[1:]
+    return v
+
+
+def _cometd_version_label(http_client: Any, fallback_api_version: str) -> str:
+    api_version = getattr(http_client, "api_version", None)
+    if api_version is not None:
+        label = getattr(api_version, "label", None)
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+        if isinstance(api_version, str) and api_version.strip():
+            return _normalise_api_version(api_version)
+    # Some sf-toolkit versions assert when data_url is accessed before
+    # login metadata is populated; treat that as a normal fallback path.
+    try:
+        data_url = getattr(http_client, "data_url", None)
+    except AssertionError:
+        data_url = None
+    if isinstance(data_url, str):
+        m = re.search(r"/services/data/v?([0-9]+(?:\.[0-9]+)?)", data_url)
+        if m:
+            return m.group(1)
+    return _normalise_api_version(fallback_api_version)
+
+
 def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> None:
     rule_id = int(rule.rule_id)
     cfg_in = rule.trigger_params or {}
-    channel = cfg_in.get("channel")
-    if not channel:
-        sensor.logger.warning("rule %s: missing 'channel' — thread exiting", rule_id)
+    try:
+        channels = _resolve_channels(cfg_in)
+    except ValueError as exc:
+        sensor.logger.warning("rule %s: invalid CDC selector config: %s — thread exiting", rule_id, exc)
         return
 
     # The rule config IS the action_params surface for sf_client.
     params = cfg_in
 
-    state_path = _state_path(rule_id, channel)
-    replay_id = _load_replay(state_path)
-    if replay_id is None:
-        replay_id = int(cfg_in.get("replay_id", -1))
+    replay_default = int(cfg_in.get("replay_id", -1))
+    replay_by_channel = {channel: replay_default for channel in channels}
+    replay_map_path = _state_map_path(rule_id)
+
+    # Preferred multi-channel storage.
+    replay_by_channel.update(_load_replay_map(replay_map_path))
+
+    # Backward compatibility for existing single-channel rules.
+    if len(channels) == 1:
+        legacy_path = _state_path(rule_id, channels[0])
+        legacy_replay = _load_replay(legacy_path)
+        if legacy_replay is not None:
+            replay_by_channel[channels[0]] = legacy_replay
 
     reconnect = int(cfg_in.get("reconnect_interval_seconds", 5))
     instance_id = f"rule_{rule_id}"
@@ -209,19 +332,36 @@ def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> N
         cometd: Optional[CometDSession] = None
         try:
             http_client = sf_client.get_client(params)
-            cometd = CometDSession(http_client)
-            cometd.handshake()
-            cometd.subscribe(channel, replay_id)
+            cometd = CometDSession(
+                http_client,
+                default_api_version=sf_client.get_api_version(params),
+            )
+            cometd.handshake(replay_by_channel)
+
+            subscribed_channels: List[str] = []
+            for channel in channels:
+                try:
+                    cometd.subscribe(channel, replay_by_channel[channel])
+                    subscribed_channels.append(channel)
+                except Exception as exc:  # noqa: BLE001
+                    sensor.logger.warning(
+                        "rule %s subscribe failed for %s: %s", rule_id, channel, exc
+                    )
+
+            if not subscribed_channels:
+                raise RuntimeError("cometd_subscribe_failed_all_channels")
+
+            subscribed_set = set(subscribed_channels)
             sensor.logger.info(
-                "rule %s subscribed to %s (replay_id=%s)", rule_id, channel, replay_id,
+                "rule %s subscribed to %s", rule_id, ", ".join(subscribed_channels),
             )
 
             while not sensor.is_shutting_down and not stop_event.is_set():
                 replies = cometd.connect()
                 for msg in replies:
                     ch = msg.get("channel")
-                    if ch == channel and msg.get("data"):
-                        normalised = _normalise_event(channel, msg["data"])
+                    if isinstance(ch, str) and ch in subscribed_set and msg.get("data"):
+                        normalised = _normalise_event(ch, msg["data"])
                         if emit_event(
                             sensor,
                             "salesforce.change_event",
@@ -230,8 +370,10 @@ def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> N
                         ):
                             rid = normalised.get("replay_id")
                             if isinstance(rid, int):
-                                replay_id = rid
-                                _save_replay(state_path, replay_id)
+                                replay_by_channel[ch] = rid
+                                _save_replay_map(replay_map_path, replay_by_channel)
+                                if len(channels) == 1:
+                                    _save_replay(_state_path(rule_id, ch), rid)
                     elif ch == "/meta/connect" and not msg.get("successful"):
                         # advice may instruct re-handshake
                         advice = msg.get("advice") or {}
@@ -241,7 +383,14 @@ def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> N
                         time.sleep(1)
 
         except Exception as exc:  # noqa: BLE001
-            sensor.logger.warning("rule %s CDC loop error: %s — reconnecting in %ss", rule_id, exc, reconnect)
+            sensor.logger.warning(
+                "rule %s CDC loop error: %s: %r traceback=%s — reconnecting in %ss",
+                rule_id,
+                type(exc).__name__,
+                exc,
+                traceback.format_exc(limit=8).strip(),
+                reconnect,
+            )
         finally:
             if cometd:
                 cometd.disconnect()
@@ -250,7 +399,7 @@ def _run_rule(rule: RuleState, sensor: Sensor, stop_event: threading.Event) -> N
             break
         _sleep_responsive(reconnect, sensor, stop_event, step=1.0)
 
-    sensor.logger.info("rule %s CDC thread stopped (last replay_id=%s)", rule_id, replay_id)
+    sensor.logger.info("rule %s CDC thread stopped", rule_id)
 
 
 class ChangeDataCaptureSensor(Sensor):

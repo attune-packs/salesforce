@@ -24,11 +24,22 @@ parameters:
   api_version:
     { type: string, default: "v60.0" }
 
+  objects:
+    type: array
+    description: |
+      Object API names to subscribe to as CDC channels (mutually exclusive with
+      `channel` and `all_events`):
+        ["Account", "Contact"]   -> /data/AccountChangeEvent, /data/ContactChangeEvent
+        ["Invoice__c"]           -> /data/Invoice__ChangeEvent
+  all_events:
+    type: boolean
+    default: false
+    description: "Subscribe to /data/ChangeEvents (all CDC events). Mutually exclusive with `channel` and `objects`."
   channel:
     type: string
-    required: true
     description: |
-      Salesforce CDC channel:
+      Optional raw Salesforce CDC channel (mutually exclusive with `objects` and
+      `all_events`; preserved for backward compatibility):
         /data/ChangeEvents                    — all CDC events
         /data/<SObject>ChangeEvent            — standard object (e.g. /data/AccountChangeEvent)
         /data/<CustomObject>__ChangeEvent     — custom object

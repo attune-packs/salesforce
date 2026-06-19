@@ -98,15 +98,6 @@ def test_connection_name_from_direct_credentials(monkeypatch):
     assert sf_client._connection_name(params) == name
 
 
-def test_connection_name_uses_explicit_direct_connection_name(monkeypatch):
-    monkeypatch.delenv("SF_CREDENTIAL_KEY", raising=False)
-
-    assert sf_client._connection_name({
-        "connection_name": "shared-salesforce",
-        "credentials": {"client_id": "ck", "client_secret": "cs"},
-    }) == "shared-salesforce"
-
-
 def test_connection_name_missing_raises(monkeypatch):
     monkeypatch.delenv("SF_CREDENTIAL_KEY", raising=False)
     with pytest.raises(sf_client.ConfigError, match="missing_salesforce_credentials"):
@@ -492,3 +483,55 @@ def test_get_api_version_param_overrides_default():
 def test_get_api_version_env_fallback(monkeypatch):
     monkeypatch.setenv("SF_API_VERSION", "v55.0")
     assert sf_client.get_api_version({}) == "v55.0"
+
+
+def test_sf_request_builds_rest_url_without_data_url(monkeypatch):
+    class _Resp:
+        status_code = 200
+        content = b'{"ok": true}'
+        text = '{"ok": true}'
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def request(self, method, url, **kwargs):
+            self.method = method
+            self.url = url
+            self.kwargs = kwargs
+            return _Resp()
+
+        @property
+        def data_url(self):  # pragma: no cover - should never be touched
+            raise AssertionError("data_url should not be accessed")
+
+    client = _Client()
+    monkeypatch.setattr(sf_client, "get_client", lambda params: client)
+
+    out = sf_client.sf_request({"api_version": "v60.0"}, "GET", "limits")
+
+    assert out == {"ok": True}
+    assert client.method == "GET"
+    assert client.url == "/services/data/v60.0/limits"
+
+
+def test_sf_request_accepts_api_version_without_v_prefix(monkeypatch):
+    class _Resp:
+        status_code = 200
+        content = b'{"ok": true}'
+        text = '{"ok": true}'
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def request(self, method, url, **kwargs):
+            self.url = url
+            return _Resp()
+
+    client = _Client()
+    monkeypatch.setattr(sf_client, "get_client", lambda params: client)
+
+    sf_client.sf_request({"api_version": "60.0"}, "GET", "limits")
+
+    assert client.url == "/services/data/v60.0/limits"

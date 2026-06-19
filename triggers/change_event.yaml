@@ -17,9 +17,11 @@ output:
   change_type:
     type: string
     required: true
+    description: "CDC operation type from ChangeEventHeader.changeType (CREATE, UPDATE, DELETE, UNDELETE, or GAP_* variants)."
   entity_name:
     type: string
     required: true
+    description: "Salesforce object API name the event is for (for example Account or CustomObject__c)."
   record_ids:
     type: array
     required: true
@@ -35,8 +37,10 @@ output:
     description: "User Id of the committer."
   transaction_key:
     type: string
+    description: "Salesforce transaction identifier shared by events produced by the same transaction."
   sequence_number:
     type: integer
+    description: "Ordering number for this event within its transaction (lower values happened earlier)."
   replay_id:
     type: integer
     description: "Salesforce replay Id of this event — store for resumability."
@@ -45,7 +49,7 @@ output:
     description: "CometD channel that delivered the event, e.g. /data/AccountChangeEvent."
   payload:
     type: object
-    description: "The full ChangeEventHeader + record payload as received from Salesforce."
+    description: "Raw CDC payload from Salesforce (`data.payload`), including `ChangeEventHeader` and changed field values."
     required: true
 
 tags: [salesforce, cdc, streaming, inbound]

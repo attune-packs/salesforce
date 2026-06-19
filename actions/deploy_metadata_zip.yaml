@@ -4,6 +4,9 @@ description: "Deploy a zipped Salesforce metadata package to an org and monitor 
 enabled: true
 workflow_file: workflows/deploy_metadata_zip.workflow.yaml
 
+default_execution_permission_set_refs:
+  - standard
+
 parameters:
   credential_key:
     type: string
@@ -11,9 +14,6 @@ parameters:
   credentials:
     type: object
     description: "Optional Salesforce credentials object. Takes precedence over credential_key."
-  connection_name:
-    type: string
-    description: "Optional in-process Salesforce connection cache name when using direct credentials."
   instance_url:
     type: string
     description: "Optional explicit Salesforce instance URL."
