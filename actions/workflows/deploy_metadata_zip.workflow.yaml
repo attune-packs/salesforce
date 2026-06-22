@@ -17,6 +17,7 @@ tasks:
       backoff: exponential
       max_delay: 60
     input:
+      org_credential_key: "{{ parameters.org_credential_key }}"
       credential_key: "{{ parameters.credential_key }}"
       credentials: "{{ parameters.credentials }}"
       instance_url: "{{ parameters.instance_url }}"
@@ -69,6 +70,7 @@ tasks:
       backoff: exponential
       max_delay: 120
     input:
+      org_credential_key: "{{ parameters.org_credential_key }}"
       credential_key: "{{ parameters.credential_key }}"
       credentials: "{{ parameters.credentials }}"
       instance_url: "{{ parameters.instance_url }}"

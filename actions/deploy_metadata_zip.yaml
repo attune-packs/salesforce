@@ -8,12 +8,15 @@ default_execution_permission_set_refs:
   - standard
 
 parameters:
+  org_credential_key:
+    type: string
+    description: "Optional keystore key ref for a non-default Salesforce org credential object. Overrides credential_key/default_org_credential_key when provided."
   credential_key:
     type: string
-    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+    description: "Legacy alias for org_credential_key."
   credentials:
     type: object
-    description: "Optional Salesforce credentials object. Takes precedence over credential_key."
+    description: "Optional Salesforce credentials object. Takes precedence over org_credential_key/credential_key."
   instance_url:
     type: string
     description: "Optional explicit Salesforce instance URL."
@@ -21,7 +24,7 @@ parameters:
     type: string
     default: "v60.0"
 
-  username: { type: string, description: "Optional top-level Salesforce login field." }
+  username: { type: string, description: "Salesforce username to authenticate as when using org credential keys/default_org_credential_key." }
   password: { type: string, description: "Optional top-level Salesforce login field." }
   consumer_key: { type: string, description: "Optional top-level Salesforce login field." }
   consumer_secret: { type: string, description: "Optional top-level Salesforce login field." }

@@ -20,12 +20,18 @@ default_execution_permission_set_refs:
 
 
 parameters:
+  org_credential_key:
+    type: string
+    description: "Optional keystore key ref for a non-default Salesforce org credential object. Overrides credential_key/default_org_credential_key when provided."
   credential_key:
     type: string
-    description: "Pack-scoped keystore key ref containing the Salesforce credentials object."
+    description: "Legacy alias for org_credential_key."
   credentials:
     type: object
-    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over org_credential_key/credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+  username:
+    type: string
+    description: "Salesforce username to authenticate as when using org credential keys/default_org_credential_key."
   instance_url:
     { type: string, description: "Optional explicit instance URL (overrides what lazy_login returns)." }
   api_version:

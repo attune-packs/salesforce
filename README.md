@@ -31,51 +31,64 @@ to the keystore so multiple worker processes share a single live session.
    → Manage Connected Apps → Permitted Users → Admin pre-approved).
 4. Pre-authorize the user once via the standard OAuth flow.
 
-### Configure credentials in the keystore
+### Configure org credentials in the keystore
 
-Store the credential object — its shape mirrors `lazy_login`'s kwargs —
-as a pack-scoped encrypted key:
+Store org-level auth material (consumer key, private key, domain) as a
+pack-scoped encrypted key:
 
 ```bash
 attune key create -e \
   --owner-type pack --owner-pack-ref salesforce \
   --ref salesforce_acme \
   --value '{
-    "username":     "integration@acme.com",
     "consumer_key": "3MVG9...",
     "private_key":  "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n",
     "domain":       "login"
   }'
 ```
 
-Then reference it from rules / workflows / action params via
-`credential_key`:
+Set `default_org_credential_key` in pack config to this key for the
+default org. At runtime, callers usually provide only `username`:
 
 ```yaml
 action_params:
-  credential_key: "salesforce_acme"
+  username:       "integration@acme.com"
   soql:           "SELECT Id, Name FROM Account LIMIT 10"
 ```
 
-The same `credential_key` value is used for three things at once:
+To target a non-default org, pass `org_credential_key` per invocation:
+
+```yaml
+action_params:
+  org_credential_key: "salesforce_other_org"
+  username:           "integration@other-org.com"
+  soql:               "SELECT Id FROM Account LIMIT 10"
+```
+
+`credential_key` is still accepted as a compatibility alias for
+`org_credential_key`.
+
+The selected org key (default or override) plus runtime `username` is used
+for three things at once:
 
 * **Credential lookup** — at runtime the action calls
-  `GET /api/v1/keys/<credential_key>` using its execution-scoped
+  `GET /api/v1/keys/<org_key>` using its execution-scoped
   `ATTUNE_API_TOKEN` to fetch the credential blob.
 * **sf-toolkit `connection_name`** — sf-toolkit's class-level connection
-  registry is keyed on this name, so within a worker process repeat
+  registry is keyed on a stable hash of `(org_key, username)`, so within a
+  worker process repeat
   invocations skip both the keystore lookup and the login round-trip.
-* **Cached session-token ref prefix** — sf-toolkit's
+* **Cached session-token ref** — sf-toolkit's
   `token_refresh_callback` writes every (re)issued access token to
-  `<credential_key>_session_token` (a separate, encrypted, pack-scoped
+  a separate, encrypted, pack-scoped
   keystore key). Cold-started processes load that cached token and skip
   straight to the first request, only falling back to a full
   `lazy_login` if the cached token is stale or rejected. By default
   cached tokens are discarded after 90 minutes — override with the
   `session_token_max_age_seconds` pack config or per-action parameter.
 
-You never need to manage the `_session_token` key by hand: it's created
-and updated automatically by the action.
+You never need to manage session-token keys by hand: they're created and
+updated automatically.
 
 ### Auth flows supported
 
@@ -84,7 +97,7 @@ credential blob:
 
 | Flow | Required fields |
 |---|---|
-| JWT Bearer | `username`, `consumer_key`, `private_key`, `domain` |
+| JWT Bearer | `consumer_key`, `private_key`, `domain` (+ runtime `username`) |
 | Password | `username`, `password`, `consumer_key` (+ optional `consumer_secret`) |
 | Client Credentials | `consumer_key`, `consumer_secret` |
 | Salesforce CLI | `sf_cli_alias` |
@@ -92,6 +105,43 @@ credential blob:
 
 `client_id` is accepted as an alias for `consumer_key`, and
 `client_secret` for `consumer_secret`.
+
+### Quick setup: External Client App + cross-pack usage
+
+1. In Salesforce, create an **External Client App** for JWT bearer auth:
+   - Enable OAuth and digital signatures.
+   - Upload the public cert (`server.crt`).
+   - Capture the app's consumer key.
+   - Pre-authorize the integration users (the usernames your workflows will pass).
+2. In Attune, create one Salesforce pack key per org with app-level material:
+   - `consumer_key`, `private_key`, and `domain` (`login` or `test`).
+   - Keep username out of this key unless you want legacy fallback behavior.
+3. Set the Salesforce pack default to that key via `default_org_credential_key`.
+4. From another pack, call Salesforce actions with runtime `username`:
+
+```yaml
+tasks:
+  - name: query_accounts
+    action: salesforce.query
+    input:
+      username: "integration@acme.com"
+      soql: "SELECT Id, Name FROM Account LIMIT 10"
+```
+
+5. To target a non-default org from another pack, pass `org_credential_key`:
+
+```yaml
+tasks:
+  - name: query_other_org
+    action: salesforce.query
+    input:
+      org_credential_key: "salesforce_other_org"
+      username: "integration@other-org.com"
+      soql: "SELECT Id, Name FROM Account LIMIT 10"
+```
+
+If your caller pack owns credentials separately, you can also pass a direct
+`credentials` object to Salesforce actions instead of an org key.
 
 ## Actions
 

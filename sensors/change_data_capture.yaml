@@ -10,12 +10,18 @@ trigger_types:
   - salesforce.change_event
 
 parameters:
+  org_credential_key:
+    type: string
+    description: "Optional keystore key ref for a non-default Salesforce org credential object. Overrides credential_key/default_org_credential_key when provided."
   credential_key:
     type: string
-    description: "Pack-scoped keystore key ref containing the Salesforce credentials object. Looked up via the execution token at runtime; doubles as the sf-toolkit connection name and as the prefix for the cached session-token keystore entry (`<credential_key>_session_token`)."
+    description: "Legacy alias for org_credential_key."
   credentials:
     type: object
-    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over org_credential_key/credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+  username:
+    type: string
+    description: "Salesforce username to authenticate as when using org credential keys/default_org_credential_key."
   connection_name:
     type: string
     description: "Optional in-process connection cache name when using direct credentials. Defaults to a hash of the credential fields."

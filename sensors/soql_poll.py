@@ -489,14 +489,21 @@ class SoqlPollSensor(Sensor):
         for rule in rules:
             cfg = _rule_config(rule)
             try:
-                key = sf_client._connection_name(cfg)
+                # Prefer a no-keystore derivation; only fall back to the
+                # network-resolving path when the name can't be derived
+                # from the rule config alone.
+                key = sf_client._connection_name_no_io(cfg)
+                if key is None:
+                    key = sf_client._connection_name(cfg)
             except Exception:
                 continue
             if key in seen:
                 continue
             seen.add(key)
             try:
-                await sf_client.close_async_client(cfg)
+                # Reuse the already-resolved name so close doesn't resolve
+                # (and hit the keystore) a second time.
+                await sf_client.close_async_client(cfg, connection_name=key)
             except Exception as exc:  # noqa: BLE001
                 self.logger.debug("close_async_client(%s) failed: %s", key, exc)
 

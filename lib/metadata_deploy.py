@@ -26,7 +26,14 @@ def api_version_number(params: Dict[str, Any]) -> str:
 
 
 def org_identifier(params: Dict[str, Any], client: Optional[Any] = None) -> str:
-    for key in ("org", "org_alias", "instance_url", "credential_key"):
+    for key in (
+        "org",
+        "org_alias",
+        "instance_url",
+        "org_credential_key",
+        "credential_key",
+        "default_org_credential_key",
+    ):
         value = params.get(key)
         if value not in (None, ""):
             return str(value)

@@ -15,10 +15,11 @@ toolkit provides:
 The Attune-specific contributions in this module are:
 
 * Resolving an action/sensor's direct ``credentials`` input or
-  ``credential_key`` parameter to a Salesforce credential blob.
+  org-material key parameters (``org_credential_key`` / ``credential_key`` /
+  ``default_org_credential_key``) to a Salesforce credential blob.
 * Persisting refreshed access tokens back to the keystore for
-  ``credential_key``-backed connections (under a derived ref
-  ``<credential_key>_session_token``) via the toolkit's
+  keystore-backed connections (under a derived user-scoped hashed ref)
+  via the toolkit's
   ``token_refresh_callback`` so sibling worker processes can skip the
   initial login round-trip. Direct credentials use only in-process caching.
 * A ``sf_request(...)`` convenience that targets the Salesforce REST
@@ -67,6 +68,22 @@ _LAZY_LOGIN_FIELDS = (
     "sf_cli_alias",
     "sf_exec_path",
     "organizationId",
+)
+
+# Top-level login fields that imply legacy direct-credential mode.
+# `username`/`domain` are intentionally excluded so a username-only invocation
+# can use org material from default/keyed credentials.
+_DIRECT_LOGIN_SIGNAL_FIELDS = (
+    "password",
+    "consumer_key",
+    "consumer_secret",
+    "private_key",
+    "security_token",
+    "sf_cli_alias",
+    "sf_exec_path",
+    "organizationId",
+    "client_id",
+    "client_secret",
 )
 
 
@@ -704,7 +721,8 @@ def _records_from_jsonl_path(path: str) -> List[Dict[str, Any]]:
 
 
 def _session_token_ref(connection_name: str) -> str:
-    return f"{connection_name}_session_token"
+    digest = hashlib.sha256(connection_name.encode("utf-8")).hexdigest()[:24]
+    return f"sf_session_token_{digest}"
 
 
 def _pack_ref() -> str:
@@ -731,13 +749,23 @@ def _max_token_age_seconds(action_params: Optional[Dict[str, Any]] = None) -> in
 def _load_cached_token(
     connection_name: str,
     action_params: Optional[Dict[str, Any]] = None,
+    legacy_org_key: Optional[str] = None,
+    allow_legacy_fallback: bool = False,
 ) -> Any:
     """Return a sf_toolkit.SalesforceToken or None if no fresh cache exists."""
-    try:
-        value = _fetch_keystore_value(_session_token_ref(connection_name))
-    except ConfigError as exc:
-        logger.debug("cached token lookup failed: %s", exc)
-        return None
+    value = None
+    refs = [_session_token_ref(connection_name)]
+    if legacy_org_key and allow_legacy_fallback:
+        refs.append(f"{legacy_org_key}_session_token")
+    for ref in refs:
+        try:
+            value = _fetch_keystore_value(ref)
+        except ConfigError as exc:
+            logger.debug("cached token lookup failed ref=%s: %s", ref, exc)
+            continue
+        if isinstance(value, dict):
+            break
+        value = None
     if not isinstance(value, dict):
         return None
     issued_at = value.get("issued_at")
@@ -798,6 +826,8 @@ def _credentials_from_input(action_params: Dict[str, Any]) -> Optional[Dict[str,
     """Return Salesforce credentials supplied directly in action/sensor input."""
     value = action_params.get("credentials")
     if value in (None, ""):
+        if not _has_legacy_direct_login_fields(action_params):
+            return None
         login_kwargs = _filter_login_kwargs(action_params)
         return login_kwargs or None
     if isinstance(value, str):
@@ -809,7 +839,15 @@ def _credentials_from_input(action_params: Dict[str, Any]) -> Optional[Dict[str,
         raise ConfigError(
             f"credentials_not_object: expected object, got {type(value).__name__}"
         )
+    username = str(action_params.get("username") or "").strip()
+    if username and not value.get("username"):
+        value = dict(value)
+        value["username"] = username
     return value
+
+
+def _has_legacy_direct_login_fields(action_params: Dict[str, Any]) -> bool:
+    return any(action_params.get(field) not in (None, "") for field in _DIRECT_LOGIN_SIGNAL_FIELDS)
 
 
 def _direct_connection_name(creds: Dict[str, Any]) -> str:
@@ -819,23 +857,66 @@ def _direct_connection_name(creds: Dict[str, Any]) -> str:
     return f"direct:{digest}"
 
 
+def _runtime_username(action_params: Dict[str, Any]) -> str:
+    return str(action_params.get("username") or "").strip()
+
+
+def _org_credential_key(action_params: Dict[str, Any]) -> str:
+    org_key = str(action_params.get("org_credential_key") or "").strip()
+    legacy_key = str(action_params.get("credential_key") or "").strip()
+    if org_key:
+        return org_key
+    if legacy_key:
+        return legacy_key
+    default_key = str(action_params.get("default_org_credential_key") or "").strip()
+    if default_key:
+        return default_key
+    for env_key in (
+        "SF_DEFAULT_ORG_CREDENTIAL_KEY",
+        "DEFAULT_ORG_CREDENTIAL_KEY",
+        "SF_CREDENTIAL_KEY",  # legacy fallback
+    ):
+        env_val = str(os.environ.get(env_key) or "").strip()
+        if env_val:
+            return env_val
+    return ""
+
+
+def _org_user_connection_name(org_source: str, username: str) -> str:
+    digest = hashlib.sha256(f"{org_source}\0{username}".encode("utf-8")).hexdigest()[:24]
+    return f"orguser:{digest}"
+
+
 def _connection_name(action_params: Dict[str, Any]) -> str:
+    name, _, _ = _resolve_credentials(action_params)
+    return name
+
+
+def _connection_name_no_io(action_params: Dict[str, Any]) -> Optional[str]:
+    """Derive the connection name without any keystore network I/O.
+
+    Mirrors the naming in :func:`_resolve_credentials` for the cases that
+    can be determined from ``action_params`` alone:
+
+      * direct/legacy credentials -> ``_direct_connection_name``
+      * org-key credentials with a runtime ``username`` ->
+        ``_org_user_connection_name``
+
+    Returns ``None`` when the name cannot be derived without a keystore
+    lookup (e.g. an org-key credential whose username lives only inside the
+    keystore record), so callers can fall back to :func:`_connection_name`.
+    """
     direct_creds = _credentials_from_input(action_params)
     if direct_creds is not None:
-        name = _direct_connection_name(direct_creds)
-    else:
-        name = (
-            action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
-        )
-    name = str(name).strip()
-    if not name:
-        raise ConfigError(
-            "missing_salesforce_credentials: pass `credentials` (a Salesforce "
-            "credential object), top-level Salesforce login fields, `credential_key` "
-            "(a pack-scoped Attune keystore ref pointing at a JSON credential "
-            "object), or set SF_CREDENTIAL_KEY"
-        )
-    return name
+        return _direct_connection_name(direct_creds)
+
+    org_key = _org_credential_key(action_params)
+    if not org_key:
+        return None
+    username = _runtime_username(action_params)
+    if not username:
+        return None
+    return _org_user_connection_name(f"key:{org_key}", username)
 
 
 def _resolve_credentials(action_params: Dict[str, Any]) -> Tuple[str, Dict[str, Any], bool]:
@@ -843,17 +924,37 @@ def _resolve_credentials(action_params: Dict[str, Any]) -> Tuple[str, Dict[str, 
     if direct_creds is not None:
         return _direct_connection_name(direct_creds), direct_creds, False
 
-    name = (
-        action_params.get("credential_key") or os.environ.get("SF_CREDENTIAL_KEY") or ""
-    )
-    name = str(name).strip()
-    if not name:
+    org_key = _org_credential_key(action_params)
+    if not org_key:
         raise ConfigError(
             "missing_salesforce_credentials: pass `credentials` (a Salesforce "
-            "credential object), top-level Salesforce login fields, `credential_key`, "
-            "or set SF_CREDENTIAL_KEY"
+            "credential object), legacy top-level Salesforce login fields, "
+            "`org_credential_key`/`credential_key`, `default_org_credential_key`, "
+            "or set SF_DEFAULT_ORG_CREDENTIAL_KEY"
         )
-    return name, _fetch_credential_from_keystore(name), True
+    creds = _fetch_credential_from_keystore(org_key)
+    runtime_username = _runtime_username(action_params)
+    key_username = str(creds.get("username") or "").strip()
+    connection_subject = "__no_username__"
+    if runtime_username:
+        username = runtime_username
+        if key_username and key_username != runtime_username:
+            logger.warning(
+                "Overriding embedded credential username for org key %s: %s -> %s",
+                org_key,
+                key_username,
+                runtime_username,
+            )
+        connection_subject = runtime_username
+    else:
+        username = key_username
+        if key_username:
+            connection_subject = key_username
+    merged = dict(creds)
+    if username:
+        merged["username"] = username
+    connection_name = _org_user_connection_name(f"key:{org_key}", connection_subject)
+    return connection_name, merged, True
 
 
 def _api_version(action_params: Dict[str, Any]) -> str:
@@ -909,19 +1010,24 @@ def _filter_login_kwargs(creds: Dict[str, Any]) -> Dict[str, Any]:
 def get_client(action_params: Dict[str, Any]) -> Any:
     """Return a registered sf_toolkit.SalesforceClient for this credential.
 
-    Connection name is the keystore ref (``credential_key``), or a stable hash
-    of the direct credential fields. Resolution order on a cold call:
+    Connection name is either:
+      * a stable hash of direct credential fields, or
+      * a stable hash of (org credential source, username) for keystore-backed
+        org material so session/token cache identity is user-scoped.
+
+    Resolution order on a cold call:
       1. Return existing in-process registration if one exists.
-      2. Use direct credentials from input, or load the credential blob from
-         keystore via ``credential_key``.
+      2. Use direct credentials from input (explicit credentials object or
+         legacy top-level login fields), or load org material from keystore via
+         ``org_credential_key``/``credential_key``/``default_org_credential_key``.
       3. For keystore-backed credentials, try to load a still-fresh session
          token from the keystore so sf-toolkit can skip the initial login.
       4. Build & register ``SalesforceClient(connection_name=..., login=...,
          token=cached_or_None, token_refresh_callback=save_to_keystore)``.
 
     sf-toolkit handles in-process token refresh and triggers our callback
-    on every refresh; the callback persists only when the connection came from
-    ``credential_key``.
+    on every refresh; the callback persists only for keystore-backed
+    connections.
 
     Returns an ``httpx.Client`` subclass — callers can use ``.get(url)``,
     ``.post(url, json=...)``, ``.put(url, content=...)``, etc. directly,
@@ -954,7 +1060,18 @@ def get_client(action_params: Dict[str, Any]) -> Any:
         )
 
     # 3) Cached session token (best-effort, optional)
-    cached_token = _load_cached_token(name, action_params) if use_keystore_cache else None
+    legacy_org_key = _org_credential_key(action_params) if use_keystore_cache else None
+    allow_legacy_fallback = use_keystore_cache and not bool(_runtime_username(action_params))
+    cached_token = (
+        _load_cached_token(
+            name,
+            action_params,
+            legacy_org_key=legacy_org_key,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+        if use_keystore_cache
+        else None
+    )
 
     # 4) Build the toolkit client
     def _refresh_callback(token: Any) -> None:
@@ -1109,7 +1226,18 @@ def get_async_client(action_params: Dict[str, Any]) -> Any:
             f"(expected one of {sorted(_LAZY_LOGIN_FIELDS)})"
         )
 
-    cached_token = _load_cached_token(base_name, action_params) if use_keystore_cache else None
+    legacy_org_key = _org_credential_key(action_params) if use_keystore_cache else None
+    allow_legacy_fallback = use_keystore_cache and not bool(_runtime_username(action_params))
+    cached_token = (
+        _load_cached_token(
+            base_name,
+            action_params,
+            legacy_org_key=legacy_org_key,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
+        if use_keystore_cache
+        else None
+    )
 
     def _refresh_callback(token: Any) -> None:
         if not use_keystore_cache:
@@ -1209,9 +1337,23 @@ async def sf_request_async(
         return resp.text
 
 
-async def close_async_client(action_params: Dict[str, Any]) -> None:
-    """Best-effort: close the registered async client for this credential."""
-    base_name = _connection_name(action_params)
+async def close_async_client(
+    action_params: Dict[str, Any],
+    *,
+    connection_name: Optional[str] = None,
+) -> None:
+    """Best-effort: close the registered async client for this credential.
+
+    Pass ``connection_name`` to reuse an already-resolved base connection
+    name and skip a redundant (potentially keystore-hitting) resolution.
+    """
+    base_name = connection_name
+    if base_name is None:
+        try:
+            base_name = _connection_name(action_params)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("close_async_client: unable to resolve connection name: %s", exc)
+            return
     async_name = f"{base_name}:async"
     try:
         from sf_toolkit import AsyncSalesforceClient  # type: ignore

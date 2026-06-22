@@ -6,12 +6,18 @@ enabled: true
 type: event
 
 parameters:
+  org_credential_key:
+    type: string
+    description: "Optional keystore key ref for a non-default Salesforce org credential object. Overrides credential_key/default_org_credential_key when provided."
   credential_key:
     type: string
-    description: "Pack-scoped Attune key holding the Salesforce credential object passed to sf_toolkit.lazy_login."
+    description: "Legacy alias for org_credential_key."
   credentials:
     type: object
-    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+    description: "Optional Salesforce credentials object passed directly to sf_toolkit.lazy_login. Takes precedence over org_credential_key/credential_key and supports fields such as username, password, consumer_key or client_id, consumer_secret or client_secret, private_key, domain, and security_token."
+  username:
+    type: string
+    description: "Salesforce username to authenticate as when using org credential keys/default_org_credential_key."
   api_version:
     type: string
     description: "Salesforce REST API version (e.g. 'v60.0'). Defaults to the Salesforce org's latest available version."
