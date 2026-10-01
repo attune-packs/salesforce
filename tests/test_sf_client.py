@@ -39,8 +39,8 @@ def test_chunked_splits_evenly():
 
 def test_session_token_ref_format():
     ref = sf_client._session_token_ref("acme")
-    assert ref.startswith("sf_session_token_")
-    assert len(ref) == len("sf_session_token_") + 24
+    assert ref.startswith("pack.salesforce.sf_session_token_")
+    assert len(ref) == len("pack.salesforce.sf_session_token_") + 24
     assert sf_client._session_token_ref("foo_bar") != sf_client._session_token_ref("foo_baz")
 
 
@@ -410,7 +410,7 @@ def test_fetch_credential_from_keystore_object(monkeypatch):
         text = ""
 
         def json(self):
-            return {"data": {"id": 1, "ref": "sf_creds", "value": {
+            return {"data": {"id": 1, "ref": "pack.salesforce.sf_creds", "value": {
                 "consumer_key": "ck-from-keystore",
                 "username": "u@acme.com",
                 "private_key": "PEMDATA",
@@ -423,8 +423,8 @@ def test_fetch_credential_from_keystore_object(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    creds = sf_client._fetch_credential_from_keystore("sf_creds")
-    assert captured["url"] == "https://attune.local/api/v1/keys/sf_creds"
+    creds = sf_client._fetch_credential_from_keystore("pack.salesforce.sf_creds")
+    assert captured["url"] == "https://attune.local/api/v1/keys/pack.salesforce.sf_creds"
     assert captured["auth"] == "Bearer exec-token-xyz"
     assert creds["consumer_key"] == "ck-from-keystore"
 
@@ -437,10 +437,10 @@ def test_fetch_credential_uses_attune_sdk_client(monkeypatch):
     }
     client, calls = _install_fake_attune_sdk(monkeypatch, key_value=expected)
 
-    creds = sf_client._fetch_credential_from_keystore("sf_creds")
+    creds = sf_client._fetch_credential_from_keystore("pack.salesforce.sf_creds")
 
     assert creds == expected
-    assert calls == {"ref": "sf_creds", "client": client}
+    assert calls == {"ref": "pack.salesforce.sf_creds", "client": client}
 
 
 def test_fetch_credential_from_keystore_404(monkeypatch):
@@ -455,7 +455,7 @@ def test_fetch_credential_from_keystore_404(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _NotFound())
     with pytest.raises(sf_client.ConfigError, match="credential_key_not_found"):
-        sf_client._fetch_credential_from_keystore("missing")
+        sf_client._fetch_credential_from_keystore("pack.salesforce.missing")
 
 
 def test_fetch_credential_missing_env(monkeypatch):
@@ -476,7 +476,7 @@ def test_fetch_credential_value_is_string_json(monkeypatch):
             return {"data": {"value": '{"consumer_key":"ck","username":"u","private_key":"k"}'}}
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
-    creds = sf_client._fetch_credential_from_keystore("sf_creds")
+    creds = sf_client._fetch_credential_from_keystore("pack.salesforce.sf_creds")
     assert creds["consumer_key"] == "ck"
 
 
@@ -492,7 +492,7 @@ def test_fetch_credential_invalid_value_raises(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
     with pytest.raises(sf_client.ConfigError, match="credential_key_not_object"):
-        sf_client._fetch_credential_from_keystore("sf_creds")
+        sf_client._fetch_credential_from_keystore("pack.salesforce.sf_creds")
 
 
 # ---------------------------------------------------------------------------
@@ -521,9 +521,9 @@ def test_load_cached_token_falls_back_to_legacy_org_ref(monkeypatch):
 
     def fake_fetch(ref):
         calls.append(ref)
-        if ref.startswith("sf_session_token_"):
+        if ref.startswith("pack.salesforce.sf_session_token_"):
             return None
-        if ref == "acme_session_token":
+        if ref == "pack.salesforce.acme_session_token":
             return {
                 "instance": "https://x.my.salesforce.com",
                 "token": "00D-legacy-cached-token",
@@ -534,12 +534,12 @@ def test_load_cached_token_falls_back_to_legacy_org_ref(monkeypatch):
     monkeypatch.setattr(sf_client, "_fetch_keystore_value", fake_fetch)
     token = sf_client._load_cached_token(
         "orguser:anything",
-        legacy_org_key="acme",
+        legacy_org_key="pack.salesforce.acme",
         allow_legacy_fallback=True,
     )
     assert token is not None
-    assert calls[0].startswith("sf_session_token_")
-    assert calls[1] == "acme_session_token"
+    assert calls[0].startswith("pack.salesforce.sf_session_token_")
+    assert calls[1] == "pack.salesforce.acme_session_token"
 
 
 def test_load_cached_token_does_not_use_legacy_ref_without_opt_in(monkeypatch):
@@ -551,10 +551,12 @@ def test_load_cached_token_does_not_use_legacy_ref_without_opt_in(monkeypatch):
         return None
 
     monkeypatch.setattr(sf_client, "_fetch_keystore_value", fake_fetch)
-    token = sf_client._load_cached_token("orguser:anything", legacy_org_key="acme")
+    token = sf_client._load_cached_token(
+        "orguser:anything", legacy_org_key="pack.salesforce.acme"
+    )
     assert token is None
     assert len(calls) == 1
-    assert calls[0].startswith("sf_session_token_")
+    assert calls[0].startswith("pack.salesforce.sf_session_token_")
 
 
 def test_load_cached_token_returns_none_when_expired(monkeypatch):
@@ -687,7 +689,8 @@ def test_save_cached_token_creates_when_missing(monkeypatch):
     def fake_post(url, headers=None, json=None, timeout=None):
         calls["post"] += 1
         assert url.endswith("/api/v1/keys")
-        assert json["ref"] == expected_ref
+        assert json["local_ref"] == sf_client._session_token_local_ref("acme")
+        assert "ref" not in json
         assert json["owner_type"] == "pack"
         assert json["owner_pack_ref"] == "salesforce"
         assert json["encrypted"] is True

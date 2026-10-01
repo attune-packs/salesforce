@@ -337,13 +337,14 @@ def _put_keystore_value(ref: str, value: Any, *, encrypted: bool = True) -> bool
 
 
 def _post_keystore_key(
-    ref: str,
+    local_ref: str,
     value: Any,
     *,
     name: str,
     pack_ref: str,
     encrypted: bool = True,
 ) -> None:
+    canonical_ref = f"pack.{pack_ref}.{local_ref}"
     client = _attune_sdk_client()
     if client is not None:
         from attune.api_client.api.secrets import create_key  # type: ignore
@@ -353,7 +354,7 @@ def _post_keystore_key(
         result = create_key.sync_detailed(
             client=client,
             body=CreateKeyRequest(
-                ref=ref,
+                local_ref=local_ref,
                 name=name,
                 owner_type=OwnerType.PACK,
                 owner_pack_ref=pack_ref,
@@ -363,11 +364,11 @@ def _post_keystore_key(
         )
         status = int(result.status_code)
         if status == 409:
-            _put_keystore_value(ref, value, encrypted=encrypted)
+            _put_keystore_value(canonical_ref, value, encrypted=encrypted)
             return
         if status >= 400:
             raise ConfigError(
-                f"keystore_create_failed ref={ref} status={status} body={result.content[:300]!r}"
+                f"keystore_create_failed ref={canonical_ref} status={status} body={result.content[:300]!r}"
             )
         return
 
@@ -376,7 +377,7 @@ def _post_keystore_key(
         "/api/v1/keys",
         headers={"Content-Type": "application/json"},
         json_body={
-            "ref": ref,
+            "local_ref": local_ref,
             "name": name,
             "owner_type": "pack",
             "owner_pack_ref": pack_ref,
@@ -387,11 +388,11 @@ def _post_keystore_key(
     )
     if resp.status_code == 409:
         # Race: a sibling created it between our PUT and POST. Retry update.
-        _put_keystore_value(ref, value, encrypted=encrypted)
+        _put_keystore_value(canonical_ref, value, encrypted=encrypted)
         return
     if resp.status_code >= 400:
         raise ConfigError(
-            f"keystore_create_failed ref={ref} status={resp.status_code} body={resp.text[:300]}"
+            f"keystore_create_failed ref={canonical_ref} status={resp.status_code} body={resp.text[:300]}"
         )
 
 
@@ -720,13 +721,17 @@ def _records_from_jsonl_path(path: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _session_token_ref(connection_name: str) -> str:
+def _session_token_local_ref(connection_name: str) -> str:
     digest = hashlib.sha256(connection_name.encode("utf-8")).hexdigest()[:24]
     return f"sf_session_token_{digest}"
 
 
 def _pack_ref() -> str:
     return os.environ.get("ATTUNE_PACK_REF") or "salesforce"
+
+
+def _session_token_ref(connection_name: str) -> str:
+    return f"pack.{_pack_ref()}.{_session_token_local_ref(connection_name)}"
 
 
 def _max_token_age_seconds(action_params: Optional[Dict[str, Any]] = None) -> int:
@@ -805,7 +810,7 @@ def _save_cached_token(connection_name: str, token: Any) -> None:
     try:
         if not _put_keystore_value(ref, payload, encrypted=True):
             _post_keystore_key(
-                ref,
+                _session_token_local_ref(connection_name),
                 payload,
                 name=f"Salesforce session token ({connection_name})",
                 pack_ref=_pack_ref(),

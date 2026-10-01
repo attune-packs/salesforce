@@ -20,7 +20,7 @@ email: "integrations@attune.io"
 #
 #        attune key create -e \
 #          --owner-type pack --owner-pack-ref salesforce \
-#          --ref salesforce_acme \
+#          --local-ref salesforce_acme \
 #          --value '{
 #            "username":     "integration@acme.com",
 #            "consumer_key": "3MVG9...",
@@ -28,7 +28,8 @@ email: "integrations@attune.io"
 #            "domain":       "login"
 #          }'
 #
-#   2. Set `default_org_credential_key` in pack config for the default org, or
+#   2. Set `default_org_credential_key` to the canonical key ref
+#      (`pack.salesforce.salesforce_acme`) for the default org, or
 #      pass a non-default org key at runtime via `org_credential_key`
 #      (`credential_key` remains a compatibility alias). The chosen key is used
 #      uses this ref for three things at once:
@@ -49,7 +50,7 @@ email: "integrations@attune.io"
 conf_schema:
   default_org_credential_key:
     type: string
-    description: "Default keystore key ref holding the org credential object (consumer key/private key/domain). Callers provide username at runtime."
+    description: "Canonical keystore key ref holding the org credential object (consumer key/private key/domain). Callers provide username at runtime."
   credential_key:
     type: string
     description: "Legacy alias for default_org_credential_key."

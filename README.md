@@ -39,7 +39,7 @@ pack-scoped encrypted key:
 ```bash
 attune key create -e \
   --owner-type pack --owner-pack-ref salesforce \
-  --ref salesforce_acme \
+  --local-ref salesforce_acme \
   --value '{
     "consumer_key": "3MVG9...",
     "private_key":  "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n",
@@ -47,7 +47,8 @@ attune key create -e \
   }'
 ```
 
-Set `default_org_credential_key` in pack config to this key for the
+Set `default_org_credential_key` in pack config to the canonical ref
+`pack.salesforce.salesforce_acme` for the
 default org. At runtime, callers usually provide only `username`:
 
 ```yaml
@@ -60,7 +61,7 @@ To target a non-default org, pass `org_credential_key` per invocation:
 
 ```yaml
 action_params:
-  org_credential_key: "salesforce_other_org"
+  org_credential_key: "pack.salesforce.salesforce_other_org"
   username:           "integration@other-org.com"
   soql:               "SELECT Id FROM Account LIMIT 10"
 ```
@@ -135,7 +136,7 @@ tasks:
   - name: query_other_org
     action: salesforce.query
     input:
-      org_credential_key: "salesforce_other_org"
+      org_credential_key: "pack.salesforce.salesforce_other_org"
       username: "integration@other-org.com"
       soql: "SELECT Id, Name FROM Account LIMIT 10"
 ```
