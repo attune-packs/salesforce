@@ -6,7 +6,7 @@ ref: salesforce
 label: "Salesforce Integration"
 name: "Salesforce Integration"
 description: "Standard interface for the Salesforce REST/Streaming APIs — CRUD, composite (sObject Collections), Bulk API 2.0, anonymous Apex, SOQL polling sensor, and Change Data Capture sensor."
-version: "0.1.0"
+version: "0.1.1"
 license: Apache-2.0
 author: "Attune Team"
 email: "integrations@attune.io"
