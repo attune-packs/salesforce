@@ -5,7 +5,9 @@ refresh). These tests cover the Attune-specific glue: keystore lookup,
 session-token caching, and the kwargs we forward to lazy_login.
 """
 
+import json
 import os
+import socket
 import sys
 import time
 import types
@@ -17,6 +19,51 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib import sf_client  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("Unexpected socket access in sf_client unit tests")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    monkeypatch.setattr(socket.socket, "connect", fail)
+
+
+@pytest.fixture
+def sdk_transport(monkeypatch):
+    import attune
+    from attune.api_client.client import AuthenticatedClient
+
+    clients = []
+
+    def install(handler):
+        client = AuthenticatedClient(
+            base_url="https://attune.example.invalid",
+            token="mock-execution-token",
+            httpx_args={"transport": httpx.MockTransport(handler)},
+        )
+        monkeypatch.setattr(attune, "context", types.SimpleNamespace(client=client))
+        clients.append(client)
+        return client
+
+    yield install
+    for client in clients:
+        client.get_httpx_client().close()
+
+
+def _sdk_key_response(ref, value):
+    return {"data": {
+        "id": 1,
+        "ref": ref,
+        "local_ref": ref.rsplit(".", 1)[-1],
+        "name": "Test key",
+        "owner_type": "pack",
+        "encrypted": True,
+        "value": value,
+        "created": "2026-01-01T00:00:00Z",
+        "updated": "2026-01-01T00:00:00Z",
+    }}
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +401,10 @@ def test_resolve_credentials_orguser_name_changes_by_username(monkeypatch):
 # Keystore credential lookup
 # ---------------------------------------------------------------------------
 
-def _set_attune_env(monkeypatch):
+def _set_fallback_attune_env(monkeypatch):
+    # These tests mock HTTPX's top-level functions, not the SDK transport.
+    # Restore the installed SDK automatically when each test finishes.
+    monkeypatch.setitem(sys.modules, "attune", None)
     monkeypatch.setenv("ATTUNE_API_URL", "https://attune.local")
     monkeypatch.setenv("ATTUNE_API_TOKEN", "exec-token-xyz")
 
@@ -402,7 +452,7 @@ def _install_fake_attune_sdk(monkeypatch, *, key_value):
 
 
 def test_fetch_credential_from_keystore_object(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     captured = {}
 
     class _Resp:
@@ -443,8 +493,74 @@ def test_fetch_credential_uses_attune_sdk_client(monkeypatch):
     assert calls == {"ref": "pack.salesforce.sf_creds", "client": client}
 
 
+@pytest.mark.parametrize("value", [{"consumer_key": "test-key"}, '{"consumer_key":"test-key"}'])
+def test_fetch_credential_uses_real_sdk_transport(sdk_transport, value):
+    requests = []
+    ref = "pack.salesforce.sf_creds"
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=_sdk_key_response(ref, value))
+
+    sdk_transport(handler)
+    assert sf_client._fetch_credential_from_keystore(ref) == {"consumer_key": "test-key"}
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert str(requests[0].url) == f"https://attune.example.invalid/api/v1/keys/{ref}"
+    assert requests[0].headers["Authorization"] == "Bearer mock-execution-token"
+
+
+@pytest.mark.parametrize("status,value,error", [
+    (404, None, "credential_key_not_found"),
+    (500, None, "keystore_lookup_failed"),
+    (200, 12345, "credential_key_not_object"),
+])
+def test_fetch_credential_real_sdk_errors(sdk_transport, status, value, error):
+    ref = "pack.salesforce.sf_creds"
+    sdk_transport(lambda request: httpx.Response(status, json=_sdk_key_response(ref, value)))
+    with pytest.raises(sf_client.ConfigError, match=error):
+        sf_client._fetch_credential_from_keystore(ref)
+
+
+@pytest.mark.parametrize("update_status", [200, 404, 500])
+def test_save_cached_token_real_sdk_transport(sdk_transport, update_status, caplog):
+    requests = []
+    ref = sf_client._session_token_ref("acme")
+
+    def handler(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer mock-execution-token"
+        body = json.loads(request.content)
+        assert body["encrypted"] is True
+        assert body["value"]["token"] == "test-cached-token"
+        assert body["value"]["instance"] == "https://salesforce.example.invalid"
+        if request.method == "PUT":
+            assert request.url.path == f"/api/v1/keys/{ref}"
+            return httpx.Response(update_status, json=_sdk_key_response(ref, body["value"]))
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/keys"
+        assert body["local_ref"] == sf_client._session_token_local_ref("acme")
+        assert body["owner_type"] == "pack"
+        assert body["owner_pack_ref"] == "salesforce"
+        assert "ref" not in body
+        return httpx.Response(201, json=_sdk_key_response(ref, body["value"]))
+
+    sdk_transport(handler)
+    token = types.SimpleNamespace(
+        instance="https://salesforce.example.invalid", token="test-cached-token",
+    )
+    sf_client._save_cached_token("acme", token)
+    assert [request.method for request in requests] == (
+        ["PUT", "POST"] if update_status == 404 else ["PUT"]
+    )
+    if update_status == 500:
+        assert "keystore_update_failed" in caplog.text
+    else:
+        assert "Failed to persist" not in caplog.text
+
+
 def test_fetch_credential_from_keystore_404(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _NotFound:
         status_code = 404
@@ -459,6 +575,7 @@ def test_fetch_credential_from_keystore_404(monkeypatch):
 
 
 def test_fetch_credential_missing_env(monkeypatch):
+    monkeypatch.setitem(sys.modules, "attune", None)
     monkeypatch.delenv("ATTUNE_API_URL", raising=False)
     monkeypatch.delenv("ATTUNE_API_TOKEN", raising=False)
     with pytest.raises(sf_client.ConfigError, match="missing_attune_env"):
@@ -466,7 +583,7 @@ def test_fetch_credential_missing_env(monkeypatch):
 
 
 def test_fetch_credential_value_is_string_json(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _Resp:
         status_code = 200
@@ -481,7 +598,7 @@ def test_fetch_credential_value_is_string_json(monkeypatch):
 
 
 def test_fetch_credential_invalid_value_raises(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _Resp:
         status_code = 200
@@ -500,7 +617,7 @@ def test_fetch_credential_invalid_value_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_load_cached_token_returns_none_when_missing(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _NotFound:
         status_code = 404
@@ -515,7 +632,7 @@ def test_load_cached_token_returns_none_when_missing(monkeypatch):
 
 def test_load_cached_token_falls_back_to_legacy_org_ref(monkeypatch):
     pytest.importorskip("sf_toolkit", reason="sf-toolkit not installed in test env")
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     issued = int(time.time()) - 60
     calls = []
 
@@ -543,7 +660,7 @@ def test_load_cached_token_falls_back_to_legacy_org_ref(monkeypatch):
 
 
 def test_load_cached_token_does_not_use_legacy_ref_without_opt_in(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     calls = []
 
     def fake_fetch(ref):
@@ -560,7 +677,7 @@ def test_load_cached_token_does_not_use_legacy_ref_without_opt_in(monkeypatch):
 
 
 def test_load_cached_token_returns_none_when_expired(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _Resp:
         status_code = 200
@@ -581,7 +698,7 @@ def test_load_cached_token_returns_none_when_expired(monkeypatch):
 def test_load_cached_token_rehydrates_when_fresh(monkeypatch):
     """Verify a fresh cached token is converted back into a SalesforceToken."""
     pytest.importorskip("sf_toolkit", reason="sf-toolkit not installed in test env")
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     issued = int(time.time()) - 60  # one minute ago — well within 90min default
 
     class _Resp:
@@ -602,7 +719,7 @@ def test_load_cached_token_rehydrates_when_fresh(monkeypatch):
 
 
 def test_load_cached_token_respects_param_max_age(monkeypatch):
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _Resp:
         status_code = 200
@@ -624,7 +741,7 @@ def test_load_cached_token_respects_param_max_age(monkeypatch):
 
 def test_save_cached_token_updates_existing_key(monkeypatch):
     """When the session-token key already exists, _save_cached_token PUTs it."""
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     monkeypatch.setenv("ATTUNE_PACK_REF", "salesforce")
 
     calls = {"put": 0, "post": 0}
@@ -662,7 +779,7 @@ def test_save_cached_token_updates_existing_key(monkeypatch):
 
 def test_save_cached_token_creates_when_missing(monkeypatch):
     """On a 404 from PUT, _save_cached_token falls back to POST /keys."""
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
     monkeypatch.setenv("ATTUNE_PACK_REF", "salesforce")
 
     calls = {"put": 0, "post": 0}
@@ -709,7 +826,7 @@ def test_save_cached_token_creates_when_missing(monkeypatch):
 
 def test_save_cached_token_swallows_failures(monkeypatch):
     """A keystore write failure must NEVER break the action — log + carry on."""
-    _set_attune_env(monkeypatch)
+    _set_fallback_attune_env(monkeypatch)
 
     class _Boom:
         status_code = 500
